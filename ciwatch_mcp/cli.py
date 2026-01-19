@@ -55,12 +55,13 @@ def run_bk_build_list(
         "bk",
         "build",
         "list",
+        "--pipeline",
         pipeline,
         "--branch",
         branch,
         "--limit",
         str(limit),
-        "--format",
+        "--output",
         "json",
     ]
 
@@ -107,9 +108,10 @@ def run_bk_job_list(
         "bk",
         "build",
         "view",
-        pipeline,
         build_number,
-        "--format",
+        "--pipeline",
+        pipeline,
+        "--output",
         "json",
     ]
 
@@ -157,9 +159,11 @@ def run_bk_job_log(pipeline: str, build_number: str, job_id: str) -> str:
         "bk",
         "job",
         "log",
-        pipeline,
-        build_number,
         job_id,
+        "--pipeline",
+        pipeline,
+        "--build",
+        build_number,
     ]
 
     try:
