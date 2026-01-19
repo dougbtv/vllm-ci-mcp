@@ -20,6 +20,9 @@ MAX_LOG_SNIPPET_LENGTH = 500
 MAX_STACK_TRACE_LENGTH = 1000
 MAX_ERROR_MESSAGE_LENGTH = 200
 
+# Processing limits
+MAX_FAILED_JOBS_TO_PROCESS = 10  # Limit to avoid timeouts
+
 # Optional repo path for ownership inference
 # Can be set via VLLM_REPO_PATH environment variable
 VLLM_REPO_PATH: Optional[Path] = None

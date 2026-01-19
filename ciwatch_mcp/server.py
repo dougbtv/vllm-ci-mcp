@@ -10,7 +10,13 @@ from mcp.server.fastmcp import FastMCP
 
 from .classify import classify_failure, deduplicate_failures
 from .cli import CLIError, run_bk_build_list, run_bk_job_list, run_bk_job_log
-from .config import DEFAULT_BRANCH, DEFAULT_PIPELINE, DEFAULT_REPO, VLLM_REPO_PATH
+from .config import (
+    DEFAULT_BRANCH,
+    DEFAULT_PIPELINE,
+    DEFAULT_REPO,
+    MAX_FAILED_JOBS_TO_PROCESS,
+    VLLM_REPO_PATH,
+)
 from .models import ScanResult
 from .normalize import extract_test_failures_from_log, parse_build_json, parse_job_json
 from .owners import infer_owner
@@ -59,9 +65,9 @@ async def scan_latest_nightly(
         jobs = [parse_job_json(j, build_info.build_number) for j in jobs_data]
         failed_jobs = [j for j in jobs if not j.passed]
 
-        # 3. Extract failures from failed jobs
+        # 3. Extract failures from failed jobs (limit to avoid timeouts)
         all_failures = []
-        for job in failed_jobs:
+        for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
             try:
                 log_text = run_bk_job_log(
                     pipeline=pipeline,
@@ -183,9 +189,9 @@ async def scan_build(
         }
         build_info = parse_build_json(build_info_dict)
 
-        # Extract failures from failed jobs
+        # Extract failures from failed jobs (limit to avoid timeouts)
         all_failures = []
-        for job in failed_jobs:
+        for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
             try:
                 log_text = run_bk_job_log(
                     pipeline=pipeline, build_number=build_number, job_id=job.job_id

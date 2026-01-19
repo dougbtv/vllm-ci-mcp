@@ -162,7 +162,7 @@ def run_bk_job_log(pipeline: str, build_number: str, job_id: str) -> str:
         job_id,
         "--pipeline",
         pipeline,
-        "--build",
+        "--build-number",
         build_number,
     ]
 
