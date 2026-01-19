@@ -77,65 +77,67 @@ ciwatch-mcp
 
 ### In Claude Code (CLI)
 
-Add to your Claude Code MCP config (`~/.claude/config.json`):
-
-```json
-{
-  "mcpServers": {
-    "vllm-ci-watch": {
-      "command": "python",
-      "args": ["-m", "ciwatch_mcp.server"],
-      "env": {
-        "BUILDKITE_TOKEN": "your-token-here",
-        "VLLM_REPO_PATH": "/path/to/vllm"
-      }
-    }
-  }
-}
-```
-
-**Quick setup:**
+**Recommended: Use the `claude mcp add` command:**
 
 ```bash
 # 1. Install the MCP server in development mode
 cd /path/to/vllm-ci-mcp
 pip install -e .
 
-# 2. Add to ~/.claude/config.json (merge with existing mcpServers if present)
-# Edit the file manually or use this script:
-python3 -c "
+# 2. Navigate to this project directory and add the MCP server
+cd /path/to/vllm-ci-mcp
+claude mcp add --transport stdio vllm-ci-watch -- python -m ciwatch_mcp.server
+
+# 3. Add environment variables to ~/.claude.json
+# Find the vllm-ci-mcp project section and add env vars to the mcpServers entry:
+# Edit manually or use:
+python3 << 'EOF'
 import json
-config_path = '${HOME}/.claude/config.json'
-try:
-    with open(config_path) as f:
-        config = json.load(f)
-except FileNotFoundError:
-    config = {}
+config_path = "/home/doug/.claude.json"
+with open(config_path) as f:
+    config = json.load(f)
 
-if 'mcpServers' not in config:
-    config['mcpServers'] = {}
-
-config['mcpServers']['vllm-ci-watch'] = {
-    'command': 'python',
-    'args': ['-m', 'ciwatch_mcp.server'],
-    'env': {
-        'BUILDKITE_TOKEN': 'your-buildkite-token-here',
-        'VLLM_REPO_PATH': '/path/to/your/vllm/repo'
-    }
-}
+# Update the project-specific MCP server config
+project_path = "/home/hdds/480ssd/codebase/vllm-ci-mcp"  # Adjust to your path
+if project_path in config.get("projects", {}):
+    if "vllm-ci-watch" in config["projects"][project_path].get("mcpServers", {}):
+        config["projects"][project_path]["mcpServers"]["vllm-ci-watch"]["env"] = {
+            "BUILDKITE_TOKEN": "your-buildkite-token-here",
+            "VLLM_REPO_PATH": "/path/to/your/vllm/repo"
+        }
 
 with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
+print("Updated env vars for vllm-ci-watch")
+EOF
 
-print('Added vllm-ci-watch to config.json')
-"
-
-# 3. Restart Claude Code to load the MCP server
-# The server will auto-start when Claude Code launches
-
-# 4. Verify it's loaded
+# 4. Restart Claude Code
 # Run: /mcp
 # You should see "vllm-ci-watch" listed
+```
+
+**Alternative: Manual configuration in `~/.claude.json`:**
+
+The `claude mcp add` command creates a project-specific config in `~/.claude.json`. You can also manually add it to the project's `mcpServers` section:
+
+```json
+{
+  "projects": {
+    "/path/to/vllm-ci-mcp": {
+      "mcpServers": {
+        "vllm-ci-watch": {
+          "type": "stdio",
+          "command": "python",
+          "args": ["-m", "ciwatch_mcp.server"],
+          "env": {
+            "BUILDKITE_TOKEN": "your-token-here",
+            "VLLM_REPO_PATH": "/path/to/vllm"
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
 **Testing the connection:**
