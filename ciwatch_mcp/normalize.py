@@ -44,10 +44,17 @@ def parse_build_json(raw: dict) -> BuildInfo:
     if finished_at:
         finished_at_dt = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
 
+    # Handle pipeline - can be dict with 'slug' or already a string
+    pipeline_raw = raw.get("pipeline", "unknown")
+    if isinstance(pipeline_raw, dict):
+        pipeline = pipeline_raw.get("slug", "unknown")
+    else:
+        pipeline = pipeline_raw
+
     return BuildInfo(
         build_number=str(raw.get("number", raw.get("id", "unknown"))),
         build_url=raw.get("web_url", raw.get("url", "")),
-        pipeline=raw.get("pipeline", {}).get("slug", "unknown"),
+        pipeline=pipeline,
         branch=raw.get("branch", "unknown"),
         commit=raw.get("commit", "unknown"),
         state=raw.get("state", "unknown"),
