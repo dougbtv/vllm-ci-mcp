@@ -23,6 +23,13 @@ MAX_ERROR_MESSAGE_LENGTH = 200
 # Processing limits
 MAX_FAILED_JOBS_TO_PROCESS = 10  # Limit to avoid timeouts
 
+# GitHub issue matching
+CI_FAILURE_LABEL = "ci-failure"  # Label used to track known CI failures
+MIN_MATCH_CONFIDENCE = 0.6  # Minimum confidence to classify as KNOWN_TRACKED
+EXACT_MATCH_CONFIDENCE = 0.9  # Confidence for exact title matches
+FUZZY_MATCH_CONFIDENCE = 0.7  # Confidence for partial matches
+WEAK_MATCH_CONFIDENCE = 0.5  # Confidence for keyword-only matches
+
 # Optional repo path for ownership inference
 # Can be set via VLLM_REPO_PATH environment variable
 VLLM_REPO_PATH: Optional[Path] = None

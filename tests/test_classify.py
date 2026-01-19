@@ -1,7 +1,16 @@
 """Tests for classify.py module."""
 
 import pytest
-from ciwatch_mcp.classify import classify_failure, deduplicate_failures
+from ciwatch_mcp.classify import (
+    classify_failure,
+    deduplicate_failures,
+    validate_issue_match,
+)
+from ciwatch_mcp.config import (
+    EXACT_MATCH_CONFIDENCE,
+    FUZZY_MATCH_CONFIDENCE,
+    WEAK_MATCH_CONFIDENCE,
+)
 from ciwatch_mcp.models import FailureClassification, TestFailure
 
 
@@ -128,3 +137,88 @@ def test_classification_confidence_levels():
     )
     classified_triage = classify_failure(failure_triage, search_github=False)
     assert classified_triage.confidence == 0.3
+
+
+def test_validate_issue_match_exact_title():
+    """Test exact test name match in issue title."""
+    issue = {
+        "title": "[CI Failure]: tests/test_foo.py::test_bar failed",
+        "labels": [{"name": "ci-failure"}],
+    }
+    failure = TestFailure(
+        test_name="tests/test_foo.py::test_bar",
+        job_name="Test Job",
+    )
+
+    is_valid, confidence = validate_issue_match(issue, failure)
+
+    assert is_valid is True
+    assert confidence == EXACT_MATCH_CONFIDENCE
+
+
+def test_validate_issue_match_job_name():
+    """Test job name match in issue title."""
+    issue = {
+        "title": "[CI Failure]: Transformers Nightly Models Test",
+        "labels": [{"name": "ci-failure"}],
+    }
+    failure = TestFailure(
+        test_name="tests/test_transformers.py::test_something",
+        job_name="Transformers Nightly Models Test",
+    )
+
+    is_valid, confidence = validate_issue_match(issue, failure)
+
+    assert is_valid is True
+    assert confidence == FUZZY_MATCH_CONFIDENCE
+
+
+def test_validate_issue_match_no_ci_failure_label():
+    """Test rejection when ci-failure label is missing."""
+    issue = {
+        "title": "[Doc]: Steps to run vLLM on your RTX5080 or 5090!",
+        "labels": [{"name": "documentation"}],  # No ci-failure label
+    }
+    failure = TestFailure(
+        test_name="tests/test_llm.py::test_entrypoints",
+        job_name="LLM Test",
+    )
+
+    is_valid, confidence = validate_issue_match(issue, failure)
+
+    assert is_valid is False
+    assert confidence == 0.0
+
+
+def test_validate_issue_match_weak_keyword():
+    """Test weak match with ci-failure label but no title match."""
+    issue = {
+        "title": "[CI Failure]: Some other test failure",
+        "labels": [{"name": "ci-failure"}],
+    }
+    failure = TestFailure(
+        test_name="tests/test_foo.py::test_bar",
+        job_name="Different Job",
+    )
+
+    is_valid, confidence = validate_issue_match(issue, failure)
+
+    assert is_valid is True
+    assert confidence == WEAK_MATCH_CONFIDENCE
+
+
+def test_validate_issue_match_partial_test_name():
+    """Test partial test name match (test file without function)."""
+    issue = {
+        "title": "[CI Failure]: tests/test_async_llm.py failures",
+        "labels": [{"name": "ci-failure"}],
+    }
+    failure = TestFailure(
+        test_name="tests/test_async_llm.py::test_load",
+        job_name="Test Job",
+    )
+
+    is_valid, confidence = validate_issue_match(issue, failure)
+
+    assert is_valid is True
+    assert confidence == EXACT_MATCH_CONFIDENCE  # File path part matches

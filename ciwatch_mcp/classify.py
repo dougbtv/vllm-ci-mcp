@@ -4,6 +4,13 @@ import re
 from typing import Optional
 
 from .cli import CLIError, search_github_issues
+from .config import (
+    CI_FAILURE_LABEL,
+    EXACT_MATCH_CONFIDENCE,
+    FUZZY_MATCH_CONFIDENCE,
+    MIN_MATCH_CONFIDENCE,
+    WEAK_MATCH_CONFIDENCE,
+)
 from .models import FailureClassification, TestFailure
 from .normalize import generate_failure_key
 
@@ -25,6 +32,112 @@ FLAKY_PATTERNS = [
     (re.compile(r"intermittent", re.I), "intermittent failure"),
     (re.compile(r"passed on retry", re.I), "passed on retry"),
 ]
+
+
+def validate_issue_match(issue: dict, failure: TestFailure) -> tuple[bool, float]:
+    """Validate if an issue actually matches the failure.
+
+    Args:
+        issue: GitHub issue dict with title and labels
+        failure: TestFailure to match against
+
+    Returns:
+        Tuple of (is_valid, confidence_score)
+        - is_valid: Whether this is a legitimate match
+        - confidence_score: 0.5-0.9 based on match quality
+    """
+    title = issue.get("title", "").lower()
+    test_name = failure.test_name.lower()
+    job_name = failure.job_name.lower()
+
+    # Extract labels
+    labels = [l["name"].lower() for l in issue.get("labels", [])]
+
+    # Must have ci-failure label to be valid
+    if CI_FAILURE_LABEL not in labels:
+        return (False, 0.0)
+
+    # Strong match: test name appears in title
+    # Handle pytest format like "tests/test_foo.py::test_bar"
+    test_parts = test_name.split("::")
+    if test_name in title:
+        return (True, EXACT_MATCH_CONFIDENCE)
+
+    # Check if any part of the test name is in the title
+    for part in test_parts:
+        if part and len(part) > 3 and part in title:
+            return (True, EXACT_MATCH_CONFIDENCE)
+
+    # Medium match: job name in title
+    if job_name in title:
+        return (True, FUZZY_MATCH_CONFIDENCE)
+
+    # Weak match: has ci-failure label but no strong title match
+    # This catches cases where keywords overlap
+    return (True, WEAK_MATCH_CONFIDENCE)
+
+
+def find_best_issue_match(
+    failure: TestFailure, repo: str
+) -> Optional[tuple[str, float, str]]:
+    """Find best matching GitHub issue for a failure.
+
+    Strategy:
+    1. Try exact phrase match in title with ci-failure label
+    2. Fall back to fuzzy search with ci-failure label
+    3. Validate and score all matches
+    4. Return best match above confidence threshold
+
+    Args:
+        failure: TestFailure to find matches for
+        repo: GitHub repository (format: "owner/repo")
+
+    Returns:
+        Tuple of (issue_url, confidence, reason) or None if no good match
+    """
+    # Try exact title match first
+    exact_query = f'"{failure.test_name}" in:title label:{CI_FAILURE_LABEL} is:issue is:open'
+
+    try:
+        exact_issues = search_github_issues(repo, exact_query, limit=3)
+
+        for issue in exact_issues:
+            is_valid, confidence = validate_issue_match(issue, failure)
+            if is_valid and confidence >= MIN_MATCH_CONFIDENCE:
+                return (
+                    issue["url"],
+                    confidence,
+                    f"Exact match in {CI_FAILURE_LABEL} issue: {issue['title']}",
+                )
+    except CLIError:
+        # gh CLI not available or query failed
+        pass
+
+    # Fallback: broader search with label filter
+    broad_query = f'{failure.test_name} label:{CI_FAILURE_LABEL} is:issue is:open'
+
+    try:
+        broad_issues = search_github_issues(repo, broad_query, limit=5)
+
+        # Score and rank all matches
+        matches = []
+        for issue in broad_issues:
+            is_valid, confidence = validate_issue_match(issue, failure)
+            if is_valid and confidence >= MIN_MATCH_CONFIDENCE:
+                matches.append((issue, confidence))
+
+        if matches:
+            # Take highest confidence match
+            best_issue, best_conf = max(matches, key=lambda x: x[1])
+            return (
+                best_issue["url"],
+                best_conf,
+                f"Matched {CI_FAILURE_LABEL} issue: {best_issue['title']}",
+            )
+    except CLIError:
+        pass
+
+    return None  # No valid match found
 
 
 def classify_failure(
@@ -51,26 +164,19 @@ def classify_failure(
     """
     failure_key = generate_failure_key(failure)
 
-    # 1. Check GitHub for existing issues
-    github_issue = None
+    # 1. Check GitHub for existing issues using improved matching
     if search_github:
         try:
-            # Search by test name
-            issues = search_github_issues(
-                repo=repo,
-                query=f"{failure.test_name} is:issue is:open",
-                limit=5,
-            )
-            if issues:
-                # Use first matching issue
-                github_issue = issues[0]["url"]
+            match_result = find_best_issue_match(failure, repo)
+            if match_result:
+                github_issue, github_confidence, github_reason = match_result
                 return FailureClassification(
                     failure_key=failure_key,
                     test_failure=failure,
                     category="KNOWN_TRACKED",
                     github_issue=github_issue,
-                    confidence=0.8,
-                    reason=f"Existing GitHub issue: {issues[0]['title']}",
+                    confidence=github_confidence,  # Variable confidence based on match quality
+                    reason=github_reason,
                 )
         except CLIError:
             # gh CLI not available, continue with other checks
