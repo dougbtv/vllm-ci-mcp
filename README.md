@@ -75,6 +75,76 @@ python -m ciwatch_mcp.server
 ciwatch-mcp
 ```
 
+### In Claude Code (CLI)
+
+Add to your Claude Code MCP config (`~/.claude/config.json`):
+
+```json
+{
+  "mcpServers": {
+    "vllm-ci-watch": {
+      "command": "python",
+      "args": ["-m", "ciwatch_mcp.server"],
+      "env": {
+        "BUILDKITE_TOKEN": "your-token-here",
+        "VLLM_REPO_PATH": "/path/to/vllm"
+      }
+    }
+  }
+}
+```
+
+**Quick setup:**
+
+```bash
+# 1. Install the MCP server in development mode
+cd /path/to/vllm-ci-mcp
+pip install -e .
+
+# 2. Add to ~/.claude/config.json (merge with existing mcpServers if present)
+# Edit the file manually or use this script:
+python3 -c "
+import json
+config_path = '${HOME}/.claude/config.json'
+try:
+    with open(config_path) as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {}
+
+if 'mcpServers' not in config:
+    config['mcpServers'] = {}
+
+config['mcpServers']['vllm-ci-watch'] = {
+    'command': 'python',
+    'args': ['-m', 'ciwatch_mcp.server'],
+    'env': {
+        'BUILDKITE_TOKEN': 'your-buildkite-token-here',
+        'VLLM_REPO_PATH': '/path/to/your/vllm/repo'
+    }
+}
+
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+
+print('Added vllm-ci-watch to config.json')
+"
+
+# 3. Restart Claude Code to load the MCP server
+# The server will auto-start when Claude Code launches
+
+# 4. Verify it's loaded
+# Run: /mcp
+# You should see "vllm-ci-watch" listed
+```
+
+**Testing the connection:**
+
+Once Claude Code is restarted, you can test by asking:
+- "Scan the latest vLLM nightly build"
+- "Check build 47580 for failures"
+- "What CI failures do we have?"
+
 ### In Claude Desktop
 
 Add to your Claude Desktop MCP config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
