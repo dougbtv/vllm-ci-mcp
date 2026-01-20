@@ -1,5 +1,6 @@
 """MCP server for vLLM CI monitoring."""
 
+import logging
 import os
 import re
 from datetime import datetime
@@ -7,6 +8,13 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+
+# Set up logging
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(name)s] %(message)s'
+)
 
 from .classify import classify_failure, deduplicate_failures
 from .cli import CLIError, run_bk_build_list, run_bk_job_list, run_bk_job_log
@@ -60,6 +68,9 @@ async def scan_latest_nightly(
         Dict with build_info, failures, daily_findings_text, standup_summary_text
     """
     try:
+        # Progress tracking
+        progress_log = []
+
         # Get repo path from env if set
         repo_path = None
         repo_path_str = os.environ.get("VLLM_REPO_PATH")
@@ -67,6 +78,9 @@ async def scan_latest_nightly(
             repo_path = Path(repo_path_str)
 
         # 1. Get latest nightly build
+        logger.info(f"Fetching latest nightly build from {pipeline} (branch: {branch})...")
+        progress_log.append(f"Fetching latest nightly build from {pipeline}")
+
         builds_data = run_bk_build_list(
             pipeline=pipeline,
             branch=branch,
@@ -78,17 +92,37 @@ async def scan_latest_nightly(
             return {"error": "No builds found"}
 
         build_info = parse_build_json(builds_data[0])
+        msg = f"Found build #{build_info.build_number}"
+        logger.info(msg)
+        progress_log.append(msg)
 
         # 2. Get all jobs for this build
+        logger.info(f"Fetching jobs for build #{build_info.build_number}...")
+        progress_log.append(f"Fetching jobs for build #{build_info.build_number}")
+
         jobs_data = run_bk_job_list(pipeline=pipeline, build_number=build_info.build_number)
 
         jobs = [parse_job_json(j, build_info.build_number) for j in jobs_data]
         failed_jobs = [j for j in jobs if not j.passed]
 
+        msg = f"Found {len(jobs)} total jobs, {len(failed_jobs)} failed"
+        logger.info(msg)
+        progress_log.append(msg)
+
+        if failed_jobs:
+            jobs_to_process = min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)
+            msg = f"Processing first {jobs_to_process} failed jobs"
+            logger.info(msg)
+            progress_log.append(msg)
+
         # 3. Extract failures from failed jobs (limit to avoid timeouts)
         all_failures = []
-        for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
+        for idx, job in enumerate(failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS], 1):
             try:
+                msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Processing job: {job.job_name}"
+                logger.info(msg)
+                progress_log.append(msg)
+
                 log_text = run_bk_job_log(
                     pipeline=pipeline,
                     build_number=build_info.build_number,
@@ -97,8 +131,17 @@ async def scan_latest_nightly(
 
                 test_failures = extract_test_failures_from_log(log_text, job.job_name)
 
+                if test_failures:
+                    msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Extracted {len(test_failures)} test failures"
+                    logger.info(msg)
+                    progress_log.append(msg)
+
                 # Classify each failure
-                for test_failure in test_failures:
+                for test_idx, test_failure in enumerate(test_failures, 1):
+                    msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Classifying test {test_idx}/{len(test_failures)}: {test_failure.test_name}"
+                    logger.info(msg)
+                    progress_log.append(msg)
+
                     classified = classify_failure(
                         test_failure, repo=repo, search_github=search_github
                     )
@@ -115,10 +158,20 @@ async def scan_latest_nightly(
 
             except CLIError as e:
                 # Log fetch failed, skip this job but continue
+                msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Failed to fetch logs for {job.job_name}, skipping"
+                logger.warning(msg)
+                progress_log.append(msg)
                 continue
 
         # 4. Deduplicate
+        logger.info(f"Deduplicating {len(all_failures)} total failures...")
+        progress_log.append(f"Deduplicating {len(all_failures)} total failures")
+
         unique_failures = deduplicate_failures(all_failures)
+
+        msg = f"Reduced to {len(unique_failures)} unique failures"
+        logger.info(msg)
+        progress_log.append(msg)
 
         # 5. Build result
         result = ScanResult(
@@ -130,8 +183,15 @@ async def scan_latest_nightly(
         )
 
         # 6. Render outputs
+        logger.info("Rendering outputs...")
+        progress_log.append("Rendering outputs")
+
         daily_findings = render_daily_findings(result, jobs=jobs)
         standup_summary = render_standup_summary(result, jobs=jobs)
+
+        msg = f"Scan complete! Processed {len(jobs)} jobs, found {len(unique_failures)} unique failures"
+        logger.info(msg)
+        progress_log.append(msg)
 
         # Return as dict with both structured data and rendered text
         return {
@@ -142,6 +202,7 @@ async def scan_latest_nightly(
             "scan_timestamp": result.scan_timestamp.isoformat(),
             "daily_findings_text": daily_findings,
             "standup_summary_text": standup_summary,
+            "progress_log": progress_log,
         }
 
     except CLIError as e:
@@ -169,6 +230,9 @@ async def scan_build(
         Dict with build_info, failures, daily_findings_text, standup_summary_text
     """
     try:
+        # Progress tracking
+        progress_log = []
+
         # Get repo path from env if set
         repo_path = None
         repo_path_str = os.environ.get("VLLM_REPO_PATH")
@@ -186,6 +250,9 @@ async def scan_build(
                 return {"error": "Could not parse build number from URL"}
 
         # Get build data by fetching job list (which includes build info)
+        logger.info(f"Fetching jobs for build #{build_number} from {pipeline}...")
+        progress_log.append(f"Fetching jobs for build #{build_number}")
+
         jobs_data = run_bk_job_list(pipeline=pipeline, build_number=build_number)
 
         if not jobs_data:
@@ -194,6 +261,10 @@ async def scan_build(
         # Parse jobs
         jobs = [parse_job_json(j, build_number) for j in jobs_data]
         failed_jobs = [j for j in jobs if not j.passed]
+
+        msg = f"Found {len(jobs)} total jobs, {len(failed_jobs)} failed"
+        logger.info(msg)
+        progress_log.append(msg)
 
         # Build a basic BuildInfo from what we can infer
         # (We don't have full build metadata without fetching it separately)
@@ -209,18 +280,37 @@ async def scan_build(
         }
         build_info = parse_build_json(build_info_dict)
 
+        if failed_jobs:
+            jobs_to_process = min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)
+            msg = f"Processing first {jobs_to_process} failed jobs"
+            logger.info(msg)
+            progress_log.append(msg)
+
         # Extract failures from failed jobs (limit to avoid timeouts)
         all_failures = []
-        for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
+        for idx, job in enumerate(failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS], 1):
             try:
+                msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Processing job: {job.job_name}"
+                logger.info(msg)
+                progress_log.append(msg)
+
                 log_text = run_bk_job_log(
                     pipeline=pipeline, build_number=build_number, job_id=job.job_id
                 )
 
                 test_failures = extract_test_failures_from_log(log_text, job.job_name)
 
+                if test_failures:
+                    msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Extracted {len(test_failures)} test failures"
+                    logger.info(msg)
+                    progress_log.append(msg)
+
                 # Classify each failure
-                for test_failure in test_failures:
+                for test_idx, test_failure in enumerate(test_failures, 1):
+                    msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Classifying test {test_idx}/{len(test_failures)}: {test_failure.test_name}"
+                    logger.info(msg)
+                    progress_log.append(msg)
+
                     classified = classify_failure(
                         test_failure, repo=repo, search_github=search_github
                     )
@@ -236,10 +326,20 @@ async def scan_build(
 
             except CLIError:
                 # Log fetch failed, skip this job
+                msg = f"[{idx}/{min(len(failed_jobs), MAX_FAILED_JOBS_TO_PROCESS)}] Failed to fetch logs for {job.job_name}, skipping"
+                logger.warning(msg)
+                progress_log.append(msg)
                 continue
 
         # Deduplicate
+        logger.info(f"Deduplicating {len(all_failures)} total failures...")
+        progress_log.append(f"Deduplicating {len(all_failures)} total failures")
+
         unique_failures = deduplicate_failures(all_failures)
+
+        msg = f"Reduced to {len(unique_failures)} unique failures"
+        logger.info(msg)
+        progress_log.append(msg)
 
         # Build result
         result = ScanResult(
@@ -251,8 +351,15 @@ async def scan_build(
         )
 
         # Render outputs
+        logger.info("Rendering outputs...")
+        progress_log.append("Rendering outputs")
+
         daily_findings = render_daily_findings(result, jobs=jobs)
         standup_summary = render_standup_summary(result, jobs=jobs)
+
+        msg = f"Scan complete! Processed {len(jobs)} jobs, found {len(unique_failures)} unique failures"
+        logger.info(msg)
+        progress_log.append(msg)
 
         return {
             "build_info": result.build_info.model_dump(),
@@ -262,6 +369,7 @@ async def scan_build(
             "scan_timestamp": result.scan_timestamp.isoformat(),
             "daily_findings_text": daily_findings,
             "standup_summary_text": standup_summary,
+            "progress_log": progress_log,
         }
 
     except CLIError as e:
