@@ -28,6 +28,7 @@ class JobInfo(BaseModel):
     exit_status: Optional[int] = None
     passed: bool
     build_number: str
+    soft_failed: bool = False  # True if job is allowed to fail
 
 
 class TestFailure(BaseModel):

@@ -115,8 +115,8 @@ async def scan_latest_nightly(
         )
 
         # 6. Render outputs
-        daily_findings = render_daily_findings(result)
-        standup_summary = render_standup_summary(result)
+        daily_findings = render_daily_findings(result, jobs=jobs)
+        standup_summary = render_standup_summary(result, jobs=jobs)
 
         # Return as dict with both structured data and rendered text
         return {
@@ -236,8 +236,8 @@ async def scan_build(
         )
 
         # Render outputs
-        daily_findings = render_daily_findings(result)
-        standup_summary = render_standup_summary(result)
+        daily_findings = render_daily_findings(result, jobs=jobs)
+        standup_summary = render_standup_summary(result, jobs=jobs)
 
         return {
             "build_info": result.build_info.model_dump(),

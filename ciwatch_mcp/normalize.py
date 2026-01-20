@@ -83,6 +83,7 @@ def parse_job_json(raw: dict, build_number: str) -> JobInfo:
         exit_status=raw.get("exit_status"),
         passed=passed,
         build_number=build_number,
+        soft_failed=raw.get("soft_failed", False),
     )
 
 
