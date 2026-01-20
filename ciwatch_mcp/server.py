@@ -51,8 +51,13 @@ async def scan_latest_nightly(
         if repo_path_str:
             repo_path = Path(repo_path_str)
 
-        # 1. Get latest build
-        builds_data = run_bk_build_list(pipeline=pipeline, branch=branch, limit=1)
+        # 1. Get latest nightly build
+        builds_data = run_bk_build_list(
+            pipeline=pipeline,
+            branch=branch,
+            limit=1,
+            message_filter="nightly"
+        )
 
         if not builds_data:
             return {"error": "No builds found"}

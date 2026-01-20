@@ -31,6 +31,7 @@ def run_bk_build_list(
     branch: str = "main",
     limit: int = 1,
     state: Optional[str] = None,
+    message_filter: Optional[str] = None,
 ) -> list[dict]:
     """Get build list as JSON from Buildkite CLI.
 
@@ -39,6 +40,7 @@ def run_bk_build_list(
         branch: Git branch to filter by
         limit: Number of builds to return
         state: Optional state filter (e.g., "failed", "passed")
+        message_filter: Optional message content filter (e.g., "nightly")
 
     Returns:
         List of build dicts from bk CLI
@@ -67,6 +69,9 @@ def run_bk_build_list(
 
     if state:
         cmd.extend(["--state", state])
+
+    if message_filter:
+        cmd.extend(["--message", message_filter])
 
     try:
         result = subprocess.run(
