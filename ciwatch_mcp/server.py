@@ -26,6 +26,21 @@ from .render import render_daily_findings, render_standup_summary
 mcp = FastMCP("vLLM CI Watch")
 
 
+@mcp.resource("prompt://ci-watch-daily")
+def get_ci_watch_prompt() -> str:
+    """CI Watch daily prompt for scanning nightly builds."""
+    return """I'm on CI watch today, for vLLM! My role is to look at latest nightly build and assess if I need to take action.
+
+Use ciwatch.scan_latest_nightly (pipeline vllm/ci, branch main, repo vllm-project/vllm, search_github=true).
+
+Then give me:
+
+- the Daily Findings output (copy/paste ready)
+- the Standup summary output (copy/paste ready)
+
+For soft failed tests, just briefly list. Focus on hard failures, those are the only ones where I am required to take action."""
+
+
 @mcp.tool(name="ciwatch.scan_latest_nightly")
 async def scan_latest_nightly(
     pipeline: str = DEFAULT_PIPELINE,
