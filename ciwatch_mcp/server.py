@@ -28,6 +28,47 @@ from .test_history import get_test_history
 mcp = FastMCP("vLLM CI Watch")
 
 
+def _apply_detail_level(failures: list, detail_level: str) -> list[dict]:
+    """Apply detail level filtering to failure output.
+
+    Reduces MCP response size by stripping verbose fields based on detail level.
+    Expected token savings for typical nightly scan with 10 failures:
+    - minimal: ~8k tokens (from ~10k to ~2k)
+    - summary: ~5k tokens (from ~10k to ~5k)
+    - full: 0 tokens (no reduction, includes daily_findings_text and standup_summary_text)
+
+    Args:
+        failures: List of FailureClassification objects
+        detail_level: "minimal", "summary", or "full"
+
+    Returns:
+        List of dicts with appropriate fields based on detail level
+    """
+    result = []
+    for failure in failures:
+        failure_dict = failure.model_dump()
+
+        if detail_level == "minimal":
+            # Minimal: just test names and categories, no logs/errors
+            failure_dict["test_failure"]["error_message"] = None
+            failure_dict["test_failure"]["stack_trace"] = None
+            failure_dict["test_failure"]["log_snippet"] = None
+            failure_dict["github_issue"] = None
+            failure_dict["reason"] = None
+        elif detail_level == "summary":
+            # Summary: keep error messages, truncate snippets, remove stack traces
+            failure_dict["test_failure"]["stack_trace"] = None
+            if failure_dict["test_failure"]["log_snippet"]:
+                snippet = failure_dict["test_failure"]["log_snippet"]
+                if len(snippet) > 200:
+                    failure_dict["test_failure"]["log_snippet"] = snippet[:200] + "..."
+        # else: detail_level == "full", keep everything
+
+        result.append(failure_dict)
+
+    return result
+
+
 @mcp.resource("prompt://ci-watch-daily")
 def get_ci_watch_prompt() -> str:
     """CI Watch daily prompt for scanning nightly builds."""
@@ -49,6 +90,8 @@ async def scan_latest_nightly(
     branch: str = DEFAULT_BRANCH,
     repo: str = DEFAULT_REPO,
     search_github: bool = True,
+    detail_level: str = "summary",
+    max_failures: int = 50,
 ) -> dict:
     """Scan the latest nightly build for failures.
 
@@ -57,6 +100,8 @@ async def scan_latest_nightly(
         branch: Git branch to scan (default: main)
         repo: GitHub repo for issue search (default: vllm-project/vllm)
         search_github: Whether to search GitHub for matching issues
+        detail_level: Output detail level - "minimal", "summary", or "full" (default: summary)
+        max_failures: Maximum number of failures to return (default: 50)
 
     Returns:
         Dict with build_info, failures, daily_findings_text, standup_summary_text
@@ -131,20 +176,26 @@ async def scan_latest_nightly(
             scan_timestamp=datetime.now(),
         )
 
-        # 6. Render outputs
-        daily_findings = render_daily_findings(result, jobs=jobs)
-        standup_summary = render_standup_summary(result, jobs=jobs)
+        # 6. Apply detail level filtering
+        failures_output = _apply_detail_level(unique_failures[:max_failures], detail_level)
 
-        # Return as dict with both structured data and rendered text
-        return {
+        # 7. Build base response
+        response = {
             "build_info": result.build_info.model_dump(),
             "total_jobs": result.total_jobs,
             "failed_jobs": result.failed_jobs,
-            "failures": [f.model_dump() for f in result.failures],
+            "failures": failures_output,
             "scan_timestamp": result.scan_timestamp.isoformat(),
-            "daily_findings_text": daily_findings,
-            "standup_summary_text": standup_summary,
         }
+
+        # 8. Add rendered text only in full mode
+        if detail_level == "full":
+            daily_findings = render_daily_findings(result, jobs=jobs)
+            standup_summary = render_standup_summary(result, jobs=jobs)
+            response["daily_findings_text"] = daily_findings
+            response["standup_summary_text"] = standup_summary
+
+        return response
 
     except CLIError as e:
         return {"error": str(e)}
@@ -158,6 +209,8 @@ async def scan_build(
     pipeline: str = DEFAULT_PIPELINE,
     repo: str = DEFAULT_REPO,
     search_github: bool = True,
+    detail_level: str = "summary",
+    max_failures: int = 50,
 ) -> dict:
     """Scan a specific build by number or URL.
 
@@ -166,6 +219,8 @@ async def scan_build(
         pipeline: Buildkite pipeline
         repo: GitHub repo for issue search
         search_github: Whether to search GitHub
+        detail_level: Output detail level - "minimal", "summary", or "full" (default: summary)
+        max_failures: Maximum number of failures to return (default: 50)
 
     Returns:
         Dict with build_info, failures, daily_findings_text, standup_summary_text
@@ -252,19 +307,26 @@ async def scan_build(
             scan_timestamp=datetime.now(),
         )
 
-        # Render outputs
-        daily_findings = render_daily_findings(result, jobs=jobs)
-        standup_summary = render_standup_summary(result, jobs=jobs)
+        # Apply detail level filtering
+        failures_output = _apply_detail_level(unique_failures[:max_failures], detail_level)
 
-        return {
+        # Build base response
+        response = {
             "build_info": result.build_info.model_dump(),
             "total_jobs": result.total_jobs,
             "failed_jobs": result.failed_jobs,
-            "failures": [f.model_dump() for f in result.failures],
+            "failures": failures_output,
             "scan_timestamp": result.scan_timestamp.isoformat(),
-            "daily_findings_text": daily_findings,
-            "standup_summary_text": standup_summary,
         }
+
+        # Add rendered text only in full mode
+        if detail_level == "full":
+            daily_findings = render_daily_findings(result, jobs=jobs)
+            standup_summary = render_standup_summary(result, jobs=jobs)
+            response["daily_findings_text"] = daily_findings
+            response["standup_summary_text"] = standup_summary
+
+        return response
 
     except CLIError as e:
         return {"error": str(e)}
