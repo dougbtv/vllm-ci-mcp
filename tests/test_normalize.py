@@ -109,3 +109,38 @@ FAILED tests/test_baz.py::test_qux
     test_names = [f.test_name for f in failures]
     assert "tests/test_foo.py::test_bar" in test_names
     assert "tests/test_baz.py::test_qux" in test_names
+
+
+def test_extract_pytest_failures_modern_format():
+    """Test extraction with modern pytest format (status after test name)."""
+    log_text = """
+tests/test_foo.py::test_bar FAILED
+tests/test_baz.py::test_qux PASSED
+"""
+    failures = extract_test_failures_from_log(log_text, "Test Job")
+    assert len(failures) == 1
+    assert failures[0].test_name == "tests/test_foo.py::test_bar"
+
+
+def test_extract_pytest_failures_short_summary():
+    """Test extraction from short test summary section."""
+    log_text = """
+Running tests...
+======= short test summary info =======
+FAILED tests/test_foo.py::test_bar - AssertionError: expected 5
+FAILED tests/test_baz.py::test_qux[param1] - RuntimeError: timeout
+======= 2 failed in 3.45s =======
+"""
+    failures = extract_test_failures_from_log(log_text, "Test Job")
+    assert len(failures) == 2
+    assert failures[0].test_name == "tests/test_foo.py::test_bar"
+    assert failures[1].test_name == "tests/test_baz.py::test_qux[param1]"
+
+
+def test_extract_pytest_failures_with_ansi_codes():
+    """Test extraction with ANSI color codes and buildkite timestamps."""
+    log_text = """_bk;t=1769067604900\x1b[31mFAILED\x1b[0m tests/v1/distributed/test_dbo.py::\x1b[1mtest_dbo_dp_ep_gsm8k[deepep_low_latency]\x1b[0m - AssertionError: DBO+DP+EP accuracy too low
+"""
+    failures = extract_test_failures_from_log(log_text, "Test Job")
+    assert len(failures) == 1
+    assert failures[0].test_name == "tests/v1/distributed/test_dbo.py::test_dbo_dp_ep_gsm8k[deepep_low_latency]"

@@ -80,7 +80,8 @@ def mock_bk_responses(monkeypatch):
         if job_id == "job-failed-1":
             return """
 Running pytest tests...
-FAILED tests/test_dbo.py::test_bar
+tests/test_dbo.py::test_bar FAILED
+tests/test_other.py::test_pass PASSED
 
 ___________ tests/test_dbo.py::test_bar ___________
 
@@ -89,18 +90,24 @@ ___________ tests/test_dbo.py::test_bar ___________
 E       AssertionError: accuracy too low: 0.590 < 0.620
 
 tests/test_dbo.py:42: AssertionError
+
+======= short test summary info =======
+FAILED tests/test_dbo.py::test_bar - AssertionError: accuracy too low: 0.590 < 0.620
+======= 1 failed, 1 passed in 3.45s =======
 """
         elif job_id == "job-passed-1":
             return """
 Running pytest tests...
-PASSED tests/test_dbo.py::test_bar
-All tests passed.
+tests/test_dbo.py::test_bar PASSED
+
+======= 1 passed in 1.23s =======
 """
         elif job_id == "job-passed-2":
             return """
 Running pytest tests...
-PASSED tests/test_dbo.py::test_bar
-All tests passed.
+tests/test_dbo.py::test_bar PASSED
+
+======= 1 passed in 1.45s =======
 """
         return ""
 

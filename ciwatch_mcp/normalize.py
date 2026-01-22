@@ -8,10 +8,43 @@ from typing import Optional
 from .config import MAX_ERROR_MESSAGE_LENGTH, MAX_LOG_SNIPPET_LENGTH, MAX_STACK_TRACE_LENGTH
 from .models import BuildInfo, JobInfo, TestFailure
 
+# ANSI escape code pattern for stripping color codes
+ANSI_ESCAPE_PATTERN = re.compile(r'\x1b\[[0-9;]*m|\[[0-9;]*m')
+
+# Buildkite timestamp pattern
+BK_TIMESTAMP_PATTERN = re.compile(r'_bk;t=[0-9]+\x07')
+
+
+def strip_ansi_codes(text: str) -> str:
+    """Remove ANSI escape codes and buildkite timestamps from text.
+
+    Args:
+        text: Text potentially containing ANSI codes
+
+    Returns:
+        Text with ANSI codes stripped
+    """
+    text = ANSI_ESCAPE_PATTERN.sub('', text)
+    text = BK_TIMESTAMP_PATTERN.sub('', text)
+    return text
+
+
 # Pytest patterns
-PYTEST_FAILED_PATTERN = re.compile(r"^FAILED ([\w/.-]+::\S+)", re.MULTILINE)
-PYTEST_ERROR_PATTERN = re.compile(r"^ERROR ([\w/.-]+::\S+)", re.MULTILINE)
-PYTEST_PASSED_PATTERN = re.compile(r"^PASSED ([\w/.-]+::\S+)", re.MULTILINE)
+# Match both old format "FAILED test::name" and new format "test::name FAILED"
+# Also match parametrized tests with brackets: test::name[param]
+# Allow for ANSI codes and buildkite timestamps before/within the line
+PYTEST_FAILED_PATTERN = re.compile(
+    r"(?:FAILED[\s\x1b\[0-9;m]+([\w/.-]+::\S+)|([\w/.-]+::\S+)[\s\x1b\[0-9;m]+FAILED)",
+    re.MULTILINE
+)
+PYTEST_ERROR_PATTERN = re.compile(
+    r"(?:ERROR[\s\x1b\[0-9;m]+([\w/.-]+::\S+)|([\w/.-]+::\S+)[\s\x1b\[0-9;m]+ERROR)",
+    re.MULTILINE
+)
+PYTEST_PASSED_PATTERN = re.compile(
+    r"(?:PASSED[\s\x1b\[0-9;m]+([\w/.-]+::\S+)|([\w/.-]+::\S+)[\s\x1b\[0-9;m]+PASSED)",
+    re.MULTILINE
+)
 
 # Error signature patterns for deduplication
 ERROR_SIG_PATTERNS = [
@@ -106,8 +139,13 @@ def extract_test_failures_from_log(log_text: str, job_name: str) -> list[TestFai
     failures = []
 
     # Find all FAILED and ERROR test names
-    failed_tests = PYTEST_FAILED_PATTERN.findall(log_text)
-    failed_tests += PYTEST_ERROR_PATTERN.findall(log_text)
+    # Pattern has 2 groups, one will be empty - take the non-empty one
+    # Strip ANSI codes from captured test names
+    failed_matches = PYTEST_FAILED_PATTERN.findall(log_text)
+    failed_tests = [strip_ansi_codes(g1 or g2) for g1, g2 in failed_matches]
+
+    error_matches = PYTEST_ERROR_PATTERN.findall(log_text)
+    failed_tests += [strip_ansi_codes(g1 or g2) for g1, g2 in error_matches]
 
     # Remove duplicates while preserving order
     seen = set()
@@ -116,6 +154,19 @@ def extract_test_failures_from_log(log_text: str, job_name: str) -> list[TestFai
         if test not in seen:
             seen.add(test)
             unique_failed_tests.append(test)
+
+    # Fallback: Try to parse "short test summary info" section
+    if not unique_failed_tests:
+        stss_match = re.search(
+            r"={3,}\s*short test summary info\s*={3,}(.*?)(?:={3,}|$)",
+            log_text,
+            re.MULTILINE | re.DOTALL
+        )
+        if stss_match:
+            stss_section = stss_match.group(1)
+            # Extract FAILED/ERROR lines from summary
+            stss_failed = re.findall(r"^(?:FAILED|ERROR)\s+([\w/.-]+::\S+)", stss_section, re.MULTILINE)
+            unique_failed_tests.extend(stss_failed)
 
     if not unique_failed_tests:
         # No pytest output detected, return job-level failure
@@ -216,8 +267,9 @@ def find_test_outcome_in_log(log_text: str, test_nodeid: str) -> dict:
     """
     escaped_test = re.escape(test_nodeid)
 
-    # Check for FAILED
-    if re.search(rf"^FAILED {escaped_test}", log_text, re.MULTILINE):
+    # Check for FAILED (both formats)
+    failed_pattern = rf"(?:^FAILED {escaped_test}|^{escaped_test}\s+FAILED)"
+    if re.search(failed_pattern, log_text, re.MULTILINE):
         failures = extract_test_failures_from_log(log_text, "")
         matching = [f for f in failures if f.test_name == test_nodeid]
         if matching:
@@ -235,8 +287,9 @@ def find_test_outcome_in_log(log_text: str, test_nodeid: str) -> dict:
             "log_excerpt": None,
         }
 
-    # Check for ERROR
-    if re.search(rf"^ERROR {escaped_test}", log_text, re.MULTILINE):
+    # Check for ERROR (both formats)
+    error_pattern = rf"(?:^ERROR {escaped_test}|^{escaped_test}\s+ERROR)"
+    if re.search(error_pattern, log_text, re.MULTILINE):
         failures = extract_test_failures_from_log(log_text, "")
         matching = [f for f in failures if f.test_name == test_nodeid]
         if matching:
@@ -254,8 +307,9 @@ def find_test_outcome_in_log(log_text: str, test_nodeid: str) -> dict:
             "log_excerpt": None,
         }
 
-    # Check for PASSED
-    if re.search(rf"^PASSED {escaped_test}", log_text, re.MULTILINE):
+    # Check for PASSED (both formats)
+    passed_pattern = rf"(?:^PASSED {escaped_test}|^{escaped_test}\s+PASSED)"
+    if re.search(passed_pattern, log_text, re.MULTILINE):
         return {
             "found": True,
             "status": "pass",
