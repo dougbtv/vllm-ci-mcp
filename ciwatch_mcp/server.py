@@ -14,6 +14,7 @@ from .config import (
     DEFAULT_BRANCH,
     DEFAULT_PIPELINE,
     DEFAULT_REPO,
+    MAX_BUILDS_FOR_TEST_HISTORY,
     MAX_FAILED_JOBS_TO_PROCESS,
     VLLM_REPO_PATH,
 )
@@ -21,6 +22,7 @@ from .models import ScanResult
 from .normalize import extract_test_failures_from_log, parse_build_json, parse_job_json
 from .owners import infer_owner
 from .render import render_daily_findings, render_standup_summary
+from .test_history import get_test_history
 
 # Initialize FastMCP server
 mcp = FastMCP("vLLM CI Watch")
@@ -293,6 +295,46 @@ async def render(scan_result: dict, format: str = "daily_findings") -> str:
 
     except Exception as e:
         return f"Error rendering: {str(e)}"
+
+
+@mcp.tool(name="ciwatch.test_history")
+async def test_history(
+    test_nodeid: str,
+    branch: str = DEFAULT_BRANCH,
+    pipeline: str = DEFAULT_PIPELINE,
+    build_query: Optional[str] = None,
+    lookback_builds: int = MAX_BUILDS_FOR_TEST_HISTORY,
+    job_filter: Optional[str] = None,
+    include_logs: bool = True,
+) -> dict:
+    """Track test outcome history across recent builds on main branch.
+
+    Args:
+        test_nodeid: Full pytest nodeid (e.g., "tests/test_foo.py::test_bar")
+        branch: Git branch (default: main)
+        pipeline: Buildkite pipeline (default: vllm/ci)
+        build_query: Optional message filter (e.g., "nightly"). Default: None (all builds)
+        lookback_builds: Number of recent builds to scan (default: 50)
+        job_filter: Optional job name filter (e.g., "Distributed Tests")
+        include_logs: Include log excerpts in output (default: True)
+
+    Returns:
+        Dict with timeline (commit-level granularity), assessment, and summary
+    """
+    try:
+        return await get_test_history(
+            test_nodeid=test_nodeid,
+            branch=branch,
+            pipeline=pipeline,
+            build_query=build_query,
+            lookback_builds=lookback_builds,
+            job_filter=job_filter,
+            include_logs=include_logs,
+        )
+    except CLIError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
 
 
 def main():

@@ -231,6 +231,102 @@ Re-render a scan result in different formats.
 standup = await ciwatch.render(result, format="standup")
 ```
 
+#### 4. `ciwatch.test_history`
+
+Track a specific test's outcome history across recent builds on main branch (commit-level granularity) to identify regressions, flakes, and failure patterns. Pinpoint the exact commit where a test started failing.
+
+**Parameters:**
+- `test_nodeid` (str, required): Full pytest nodeid (e.g., `"tests/test_foo.py::test_bar"`)
+- `branch` (str, default: `"main"`): Git branch to scan
+- `pipeline` (str, default: `"vllm/ci"`): Buildkite pipeline
+- `build_query` (str, optional): Message filter (e.g., `"nightly"`). Default: None (all builds)
+- `lookback_builds` (int, default: `50`): Number of recent builds to scan
+- `job_filter` (str, optional): Job name filter (e.g., `"Distributed Tests"`)
+- `include_logs` (bool, default: `true`): Include log excerpts in output
+
+**Returns:**
+```json
+{
+  "test_nodeid": "tests/test_foo.py::test_bar",
+  "timeline": [
+    {
+      "build_number": 12345,
+      "build_url": "https://buildkite.com/...",
+      "created_at": "2024-01-22T10:00:00Z",
+      "commit_sha": "abc123",
+      "test_found": true,
+      "test_status": "fail",
+      "jobs": [
+        {
+          "job_name": "Distributed Tests (H100)",
+          "job_url": "https://...",
+          "status": "fail",
+          "fingerprint_normalized": "AssertionError: accuracy <NUM> < <NUM>",
+          "log_excerpt": "..."
+        }
+      ]
+    }
+  ],
+  "assessment": {
+    "classification": "REGRESSION",
+    "confidence": "HIGH",
+    "notes": [
+      "Clear transition at build 12344 (commit abc123)",
+      "Consistent failure fingerprint across 5 builds"
+    ],
+    "transition_build": 12344
+  },
+  "summary": "## Test History: `tests/test_foo.py::test_bar`..."
+}
+```
+
+**Examples:**
+```python
+# Basic usage - track last 50 builds on main (one per commit)
+result = await ciwatch.test_history(
+    test_nodeid="tests/v1/distributed/test_dbo.py::test_dbo_dp_ep_gsm8k[deepep_low_latency]"
+)
+
+# Filter to only nightly builds (less granular but faster)
+result = await ciwatch.test_history(
+    test_nodeid="tests/test_foo.py::test_bar",
+    build_query="nightly",
+    lookback_builds=30
+)
+
+# Filter to specific job type
+result = await ciwatch.test_history(
+    test_nodeid="tests/test_foo.py::test_bar",
+    job_filter="Distributed Tests",
+    lookback_builds=40
+)
+
+# Scan fewer builds for faster results
+result = await ciwatch.test_history(
+    test_nodeid="tests/test_foo.py::test_bar",
+    lookback_builds=20,
+    include_logs=False  # Skip log excerpts for speed
+)
+```
+
+**Assessment Classifications:**
+- **REGRESSION**: Clear transition from passing to failing with consistent error
+- **FLAKE_ONSET**: Recent increase in failure rate (20-80%), alternating outcomes
+- **PERSISTENT_FAIL**: Failing in >80% of recent builds
+- **SPORADIC**: Rare failures (<20%), mostly passing
+- **INSUFFICIENT_DATA**: Test found in <3 builds, not enough data
+
+**Key Features:**
+- **Commit-level granularity**: One build per commit on main = precise regression detection
+- **Automatic assessment**: Classifies as regression, flake, persistent fail, or sporadic
+- **Slack-ready output**: Human-friendly summary with Buildkite links to builds/commits
+
+**Limitations:**
+- Log parsing may miss tests if output format is non-standard
+- Budget limits prevent exhaustive search (max 20 jobs/build, 200KB logs total)
+- Fingerprint normalization is conservative - some variations may not be grouped
+- Requires builds exist on main branch (works best with CI on every commit)
+
 ## Output Examples
 
 ### Daily Findings
@@ -299,6 +395,9 @@ Failures are deduplicated using a stable hash of:
 - `classify.py`: Classification heuristics
 - `owners.py`: CODEOWNERS parsing and git blame
 - `render.py`: Markdown output formatters
+- `test_history.py`: Test history tracking orchestration
+- `fingerprint.py`: Failure fingerprint normalization
+- `assessment.py`: Test history pattern classification
 - `server.py`: FastMCP tool registrations
 
 ### Data Flow

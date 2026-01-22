@@ -33,3 +33,9 @@ WEAK_MATCH_CONFIDENCE = 0.5  # Confidence for keyword-only matches
 # Optional repo path for ownership inference
 # Can be set via VLLM_REPO_PATH environment variable
 VLLM_REPO_PATH: Optional[Path] = None
+
+# Test history budgets
+MAX_BUILDS_FOR_TEST_HISTORY = 50  # Default lookback (commit-level tracking)
+MAX_JOBS_PER_BUILD_FOR_TEST_HISTORY = 20  # Avoid scanning hundreds of jobs
+MAX_LOG_BYTES_FOR_TEST_HISTORY = 200_000  # 200KB total across all logs
+ESTIMATED_LOG_SIZE_PER_JOB = 10_000  # Conservative estimate for budget planning

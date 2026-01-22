@@ -11,6 +11,7 @@ from .models import BuildInfo, JobInfo, TestFailure
 # Pytest patterns
 PYTEST_FAILED_PATTERN = re.compile(r"^FAILED ([\w/.-]+::\S+)", re.MULTILINE)
 PYTEST_ERROR_PATTERN = re.compile(r"^ERROR ([\w/.-]+::\S+)", re.MULTILINE)
+PYTEST_PASSED_PATTERN = re.compile(r"^PASSED ([\w/.-]+::\S+)", re.MULTILINE)
 
 # Error signature patterns for deduplication
 ERROR_SIG_PATTERNS = [
@@ -197,3 +198,75 @@ def generate_failure_key(failure: TestFailure) -> str:
 
     key_string = "::".join(components)
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
+
+
+def find_test_outcome_in_log(log_text: str, test_nodeid: str) -> dict:
+    """Find specific test outcome in pytest log.
+
+    Args:
+        log_text: Raw log text from job
+        test_nodeid: Full pytest nodeid (e.g., "tests/test_foo.py::test_bar")
+
+    Returns:
+        Dict with keys:
+        - found: bool - whether test was found in log
+        - status: str - "pass" | "fail" | "unknown"
+        - error_message: Optional[str] - error message if failed
+        - log_excerpt: Optional[str] - relevant log excerpt
+    """
+    escaped_test = re.escape(test_nodeid)
+
+    # Check for FAILED
+    if re.search(rf"^FAILED {escaped_test}", log_text, re.MULTILINE):
+        failures = extract_test_failures_from_log(log_text, "")
+        matching = [f for f in failures if f.test_name == test_nodeid]
+        if matching:
+            return {
+                "found": True,
+                "status": "fail",
+                "error_message": matching[0].error_message,
+                "log_excerpt": matching[0].log_snippet,
+            }
+        # Found FAILED but couldn't extract details
+        return {
+            "found": True,
+            "status": "fail",
+            "error_message": None,
+            "log_excerpt": None,
+        }
+
+    # Check for ERROR
+    if re.search(rf"^ERROR {escaped_test}", log_text, re.MULTILINE):
+        failures = extract_test_failures_from_log(log_text, "")
+        matching = [f for f in failures if f.test_name == test_nodeid]
+        if matching:
+            return {
+                "found": True,
+                "status": "fail",
+                "error_message": matching[0].error_message,
+                "log_excerpt": matching[0].log_snippet,
+            }
+        # Found ERROR but couldn't extract details
+        return {
+            "found": True,
+            "status": "fail",
+            "error_message": None,
+            "log_excerpt": None,
+        }
+
+    # Check for PASSED
+    if re.search(rf"^PASSED {escaped_test}", log_text, re.MULTILINE):
+        return {
+            "found": True,
+            "status": "pass",
+            "error_message": None,
+            "log_excerpt": None,
+        }
+
+    # Test not found
+    return {
+        "found": False,
+        "status": "unknown",
+        "error_message": None,
+        "log_excerpt": None,
+    }
