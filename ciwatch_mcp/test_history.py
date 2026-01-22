@@ -236,12 +236,13 @@ async def get_test_history(
     budget = ResourceBudget()
 
     # Fetch builds on branch
+    # NOTE: build_query parameter is deprecated and ignored to avoid timeouts
+    # (message_filter uses client-side filtering which is slow)
     try:
         builds_raw = run_bk_build_list(
             pipeline=pipeline,
             branch=branch,
             limit=lookback_builds,
-            message_filter=build_query,
         )
     except CLIError as e:
         return {"error": str(e)}

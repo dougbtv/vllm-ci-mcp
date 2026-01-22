@@ -184,6 +184,133 @@ def run_bk_job_log(pipeline: str, build_number: str, job_id: str) -> str:
     return result.stdout
 
 
+def run_bk_analytics_tests(
+    suite_slug: str = "ci-1",
+    order: Optional[str] = None,
+    state: Optional[str] = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Fetch tests from Test Analytics API.
+
+    Args:
+        suite_slug: Test suite slug (default: ci-1)
+        order: Sort order (recently_failed, slowest)
+        state: Filter by state (flaky, failed)
+        limit: Max results
+
+    Returns:
+        List of test dicts from Test Analytics API
+
+    Raises:
+        CLIError: If bk not available or command fails
+    """
+    if not check_cli_available("bk"):
+        raise CLIError("bk CLI not found")
+
+    cmd = ["bk", "api", "--analytics", f"/suites/{suite_slug}/tests"]
+
+    params = []
+    if order:
+        params.append(f"order={order}")
+    if state:
+        params.append(f"state={state}")
+    if limit:
+        params.append(f"limit={limit}")
+
+    if params:
+        cmd[-1] = cmd[-1] + "?" + "&".join(params)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise CLIError("bk analytics API timed out after 30s")
+
+    if result.returncode != 0:
+        raise CLIError(f"bk analytics API failed: {result.stderr}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise CLIError(f"Failed to parse bk analytics JSON: {e}")
+
+
+def run_bk_analytics_test_detail(
+    suite_slug: str,
+    test_id: str,
+) -> dict:
+    """Get detailed info for a specific test.
+
+    Args:
+        suite_slug: Test suite slug
+        test_id: Test ID
+
+    Returns:
+        Test detail dict
+
+    Raises:
+        CLIError: If bk not available or command fails
+    """
+    if not check_cli_available("bk"):
+        raise CLIError("bk CLI not found")
+
+    cmd = ["bk", "api", "--analytics", f"/suites/{suite_slug}/tests/{test_id}"]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise CLIError("bk analytics API timed out after 30s")
+
+    if result.returncode != 0:
+        raise CLIError(f"bk analytics API failed: {result.stderr}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise CLIError(f"Failed to parse bk analytics JSON: {e}")
+
+
+def run_bk_analytics_test_runs(
+    suite_slug: str,
+    test_id: str,
+    limit: int = 100,
+) -> list[dict]:
+    """Get run history for a specific test.
+
+    Args:
+        suite_slug: Test suite slug
+        test_id: Test ID
+        limit: Max results
+
+    Returns:
+        List of run dicts with commit_sha, created_at, status, etc.
+
+    Raises:
+        CLIError: If bk not available or command fails
+    """
+    if not check_cli_available("bk"):
+        raise CLIError("bk CLI not found")
+
+    cmd = [
+        "bk",
+        "api",
+        "--analytics",
+        f"/suites/{suite_slug}/tests/{test_id}/runs?limit={limit}",
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise CLIError("bk analytics API timed out after 30s")
+
+    if result.returncode != 0:
+        raise CLIError(f"bk analytics API failed: {result.stderr}")
+
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise CLIError(f"Failed to parse bk analytics JSON: {e}")
+
+
 def search_github_issues(
     repo: str, query: str, limit: int = 10
 ) -> list[dict]:

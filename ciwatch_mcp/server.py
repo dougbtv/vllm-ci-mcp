@@ -9,7 +9,15 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from .classify import classify_failure, deduplicate_failures
-from .cli import CLIError, run_bk_build_list, run_bk_job_list, run_bk_job_log
+from .cli import (
+    CLIError,
+    run_bk_analytics_test_detail,
+    run_bk_analytics_test_runs,
+    run_bk_analytics_tests,
+    run_bk_build_list,
+    run_bk_job_list,
+    run_bk_job_log,
+)
 from .config import (
     DEFAULT_BRANCH,
     DEFAULT_PIPELINE,
@@ -67,6 +75,68 @@ def _apply_detail_level(failures: list, detail_level: str) -> list[dict]:
         result.append(failure_dict)
 
     return result
+
+
+def _analyze_regression(runs: list[dict]) -> dict:
+    """Analyze run history to find potential regression commit.
+
+    Args:
+        runs: List of run dicts (should be sorted chronologically)
+
+    Returns:
+        Dict with regression analysis
+    """
+    if not runs or len(runs) < 2:
+        return {
+            "regression_detected": False,
+            "note": "Insufficient data for regression analysis",
+        }
+
+    # Find first failure after a series of passes
+    # (Simple heuristic: 3+ passes, then a failure)
+    passing_streak = 0
+    regression_commit = None
+    regression_timestamp = None
+
+    for i, run in enumerate(runs):
+        status = run.get("status", "").lower()
+
+        if status in ["passed", "pass"]:
+            passing_streak += 1
+        elif status in ["failed", "fail"]:
+            if passing_streak >= 3:
+                # Likely regression
+                regression_commit = run.get("commit_sha", "unknown")
+                regression_timestamp = run.get("created_at")
+                break
+            passing_streak = 0
+
+    if regression_commit:
+        return {
+            "regression_detected": True,
+            "likely_commit": regression_commit[:8],
+            "timestamp": regression_timestamp,
+            "confidence": "medium",
+            "note": f"Test failed after {passing_streak} consecutive passes",
+        }
+
+    # Check for flakiness (alternating pass/fail)
+    if len(runs) >= 10:
+        statuses = [r.get("status", "").lower() for r in runs[:10]]
+        failures = sum(1 for s in statuses if s in ["failed", "fail"])
+
+        if 2 <= failures <= 8:
+            return {
+                "regression_detected": False,
+                "flaky_detected": True,
+                "fail_rate": f"{failures}/10",
+                "note": "Test shows intermittent failures (flaky behavior)",
+            }
+
+    return {
+        "regression_detected": False,
+        "note": "No clear regression pattern found",
+    }
 
 
 @mcp.resource("prompt://ci-watch-daily")
@@ -369,13 +439,16 @@ async def test_history(
     job_filter: Optional[str] = None,
     include_logs: bool = True,
 ) -> dict:
-    """Track test outcome history across recent builds on main branch.
+    """Track test outcome history across recent builds (log-based).
+
+    NOTE: For faster results with built-in flaky detection, use ciwatch.test_history_analytics.
+    This tool parses logs and is resource-intensive.
 
     Args:
         test_nodeid: Full pytest nodeid (e.g., "tests/test_foo.py::test_bar")
         branch: Git branch (default: main)
         pipeline: Buildkite pipeline (default: vllm/ci)
-        build_query: Optional message filter (e.g., "nightly"). Default: None (all builds)
+        build_query: Optional message filter (e.g., "nightly"). DEPRECATED - may cause timeouts
         lookback_builds: Number of recent builds to scan (default: 50)
         job_filter: Optional job name filter (e.g., "Distributed Tests")
         include_logs: Include log excerpts in output (default: True)
@@ -393,6 +466,86 @@ async def test_history(
             job_filter=job_filter,
             include_logs=include_logs,
         )
+    except CLIError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool(name="ciwatch.test_history_analytics")
+async def test_history_analytics(
+    test_name: str,
+    suite_slug: str = "ci-1",
+) -> dict:
+    """Check if a test is flagged as flaky in Buildkite Test Analytics.
+
+    Much faster than log parsing - uses pre-computed analytics data.
+    Note: The Buildkite Analytics REST API currently has limited endpoints.
+    Full run history is not available via REST API.
+
+    Args:
+        test_name: Test name to search for (e.g., "test_async_tp_pass_replace")
+        suite_slug: Test suite slug (default: ci-1)
+
+    Returns:
+        Dict with test info and flaky status
+    """
+    try:
+        # Search for test in all tests
+        all_tests = run_bk_analytics_tests(suite_slug=suite_slug, limit=2000)
+
+        # Match test by name
+        matching_tests = [t for t in all_tests if test_name in t.get("name", "")]
+
+        if not matching_tests:
+            # Try checking flaky tests specifically
+            flaky_tests = run_bk_analytics_tests(suite_slug=suite_slug, state="flaky", limit=1000)
+            flaky_matches = [t for t in flaky_tests if test_name in t.get("name", "")]
+
+            if flaky_matches:
+                matching_tests = flaky_matches
+            else:
+                return {
+                    "error": f"Test '{test_name}' not found in Test Analytics",
+                    "suggestion": "Try partial name or check if test exists in suite",
+                }
+
+        # If multiple matches, return list for user to choose
+        if len(matching_tests) > 1:
+            return {
+                "error": "Multiple tests match",
+                "matches": [
+                    {
+                        "id": t["id"],
+                        "name": t["name"],
+                        "scope": t.get("scope", ""),
+                        "location": t.get("location", ""),
+                    }
+                    for t in matching_tests
+                ],
+            }
+
+        test = matching_tests[0]
+
+        # Check if test appears in flaky list
+        flaky_tests = run_bk_analytics_tests(suite_slug=suite_slug, state="flaky", limit=1000)
+        is_flaky = any(t["id"] == test["id"] for t in flaky_tests)
+
+        # Check if test appears in recently failed list
+        failed_tests = run_bk_analytics_tests(suite_slug=suite_slug, order="recently_failed", limit=100)
+        recently_failed = any(t["id"] == test["id"] for t in failed_tests[:20])
+
+        return {
+            "test_name": test["name"],
+            "test_location": test.get("location", ""),
+            "test_id": test["id"],
+            "web_url": test.get("web_url", ""),
+            "is_flaky": is_flaky,
+            "recently_failed": recently_failed,
+            "note": "Full run history and reliability metrics are not available via Buildkite Analytics REST API",
+            "suggestion": f"View detailed analytics in web UI: {test.get('web_url', 'N/A')}",
+        }
+
     except CLIError as e:
         return {"error": str(e)}
     except Exception as e:
