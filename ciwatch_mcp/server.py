@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .buildkite_api import BuildkiteAPIError, BuildkiteClient
 from .classify import classify_failure, deduplicate_failures
+from .cli import CLIError
 from .config import (
     DEFAULT_BRANCH,
     DEFAULT_PIPELINE,
@@ -18,8 +19,19 @@ from .config import (
     MAX_FAILED_JOBS_TO_PROCESS,
     VLLM_REPO_PATH,
 )
-from .models import ScanResult
-from .normalize import extract_test_failures_from_log, parse_build_json, parse_job_json
+from .models import (
+    JobTestFailure,
+    JobTestFailuresResult,
+    ScanResult,
+    TestAnalyticsInfo,
+    TestAnalyticsBulkResult,
+)
+from .normalize import (
+    extract_test_failures_from_log,
+    parse_build_json,
+    parse_job_json,
+    parse_test_nodeid,
+)
 from .owners import infer_owner
 from .render import render_daily_findings, render_standup_summary
 from .test_history import get_test_history
@@ -129,6 +141,56 @@ def _analyze_regression(runs: list[dict]) -> dict:
         "regression_detected": False,
         "note": "No clear regression pattern found",
     }
+
+
+def _match_job_by_name(
+    job_name_or_id: str,
+    jobs: list[dict],
+    strategy: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Match job by name or ID using specified strategy.
+
+    Args:
+        job_name_or_id: Job name pattern or UUID
+        jobs: List of job dicts from build
+        strategy: "exact", "fuzzy", or "id"
+
+    Returns:
+        (matched_job, error_message)
+        If successful: (job_dict, None)
+        If failed: (None, error_message)
+    """
+    if strategy == "id":
+        # Direct ID lookup
+        for job in jobs:
+            if job.get("id") == job_name_or_id:
+                return job, None
+        return None, f"Job ID {job_name_or_id} not found"
+
+    elif strategy == "exact":
+        # Case-sensitive exact match
+        matches = [j for j in jobs if j.get("name") == job_name_or_id]
+        if len(matches) == 1:
+            return matches[0], None
+        elif len(matches) == 0:
+            return None, f"Job '{job_name_or_id}' not found"
+        else:
+            return None, f"Multiple exact matches for '{job_name_or_id}'"
+
+    elif strategy == "fuzzy":
+        # Case-insensitive substring match
+        pattern = job_name_or_id.lower()
+        matches = [j for j in jobs if pattern in j.get("name", "").lower()]
+        if len(matches) == 1:
+            return matches[0], None
+        elif len(matches) == 0:
+            available = [j.get("name") for j in jobs]
+            return None, f"No jobs match '{job_name_or_id}'. Available: {available}"
+        else:
+            candidates = [{"id": j["id"], "name": j["name"]} for j in matches]
+            return None, f"Multiple matches. Candidates: {candidates}"
+
+    return None, f"Unknown match strategy: {strategy}"
 
 
 @mcp.resource("prompt://ci-watch-daily")
@@ -498,7 +560,7 @@ async def test_history(
 
 @mcp.tool(name="ciwatch.test_history_analytics")
 async def test_history_analytics(
-    test_name: str,
+    test_name_or_nodeid: str,
     suite_slug: str = "ci-1",
 ) -> dict:
     """Check if a test is flagged as flaky in Buildkite Test Analytics.
@@ -508,7 +570,8 @@ async def test_history_analytics(
     Full run history is not available via REST API.
 
     Args:
-        test_name: Test name to search for (e.g., "test_async_tp_pass_replace")
+        test_name_or_nodeid: Test name (e.g., "test_foo") OR
+                             full nodeid (e.g., "tests/foo.py::test_bar[param]")
         suite_slug: Test suite slug (default: ci-1)
 
     Returns:
@@ -518,22 +581,43 @@ async def test_history_analytics(
         # Initialize Buildkite client
         client = BuildkiteClient()
 
+        # Parse if nodeid (contains "::")
+        scope = None
+        test_name = test_name_or_nodeid
+        if "::" in test_name_or_nodeid:
+            scope, test_name = parse_test_nodeid(test_name_or_nodeid)
+
         # Search for test in all tests
         all_tests = client.list_analytics_tests(suite_slug=suite_slug, limit=100)
 
-        # Match test by name
-        matching_tests = [t for t in all_tests if test_name in t.get("name", "")]
+        # Match test by name (with optional scope filter)
+        matching_tests = []
+        for t in all_tests:
+            # Check if name matches
+            if test_name not in t.get("name", ""):
+                continue
+            # If we have a scope, filter by it
+            if scope and t.get("scope") != scope:
+                continue
+            matching_tests.append(t)
 
         if not matching_tests:
             # Try checking flaky tests specifically
             flaky_tests = client.list_analytics_tests(suite_slug=suite_slug, state="flaky", limit=100)
-            flaky_matches = [t for t in flaky_tests if test_name in t.get("name", "")]
+            flaky_matches = []
+            for t in flaky_tests:
+                if test_name not in t.get("name", ""):
+                    continue
+                if scope and t.get("scope") != scope:
+                    continue
+                flaky_matches.append(t)
 
             if flaky_matches:
                 matching_tests = flaky_matches
             else:
+                search_term = f"'{test_name_or_nodeid}'"
                 return {
-                    "error": f"Test '{test_name}' not found in Test Analytics",
+                    "error": f"Test {search_term} not found in Test Analytics",
                     "suggestion": "Try partial name or check if test exists in suite",
                 }
 
@@ -572,6 +656,223 @@ async def test_history_analytics(
             "note": "Full run history and reliability metrics are not available via Buildkite Analytics REST API",
             "suggestion": f"View detailed analytics in web UI: {test.get('web_url', 'N/A')}",
         }
+
+    except BuildkiteAPIError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool(name="ciwatch.get_job_test_failures")
+async def get_job_test_failures(
+    build_id_or_url: str,
+    job_name_or_id: str,
+    pipeline: str = DEFAULT_PIPELINE,
+    match_strategy: str = "fuzzy",
+) -> dict:
+    """Extract pytest test failures from a specific job's logs.
+
+    Args:
+        build_id_or_url: Build number (e.g., "48161") or full Buildkite URL
+        job_name_or_id: Job name (e.g., "Entrypoints Test") or job UUID
+        pipeline: Buildkite pipeline slug (default: vllm/ci)
+        match_strategy:
+            - "exact": Case-sensitive exact match on job name
+            - "fuzzy": Case-insensitive substring match (default)
+            - "id": Treat job_name_or_id as job UUID directly
+
+    Returns:
+        Dict with job_info, test_failures, and total_failures
+    """
+    try:
+        # Initialize Buildkite client
+        client = BuildkiteClient()
+
+        # Parse build number from URL if needed
+        build_number = build_id_or_url
+        if build_id_or_url.startswith("http"):
+            match = re.search(r"/builds/(\d+)", build_id_or_url)
+            if match:
+                build_number = match.group(1)
+            else:
+                return {"error": "Could not parse build number from URL"}
+
+        # Get build data to find the job
+        build_data = client.get_build(pipeline=pipeline, build_number=build_number)
+        jobs_data = build_data.get("jobs", [])
+
+        if not jobs_data:
+            return {"error": f"No jobs found for build {build_number}"}
+
+        # Match job using strategy
+        matched_job, error_msg = _match_job_by_name(job_name_or_id, jobs_data, match_strategy)
+        if not matched_job:
+            return {"error": error_msg}
+
+        # Extract job info
+        job_info = {
+            "job_id": matched_job["id"],
+            "job_name": matched_job["name"],
+            "job_url": matched_job.get("web_url", ""),
+            "state": matched_job.get("state", "unknown"),
+            "exit_status": matched_job.get("exit_status"),
+        }
+
+        # Fetch job log
+        try:
+            log_text = client.get_job_log(
+                pipeline=pipeline,
+                build_number=build_number,
+                job_id=matched_job["id"],
+            )
+        except BuildkiteAPIError as e:
+            return {"error": f"Could not fetch job log: {str(e)}"}
+
+        # Extract test failures from log
+        test_failures = extract_test_failures_from_log(log_text, matched_job["name"])
+
+        # Convert to JobTestFailure models with parsed nodeid
+        job_test_failures = []
+        for tf in test_failures:
+            scope, test_name = parse_test_nodeid(tf.test_name)
+            job_test_failures.append(
+                JobTestFailure(
+                    test_nodeid=tf.test_name,
+                    scope=scope,
+                    test_name=test_name,
+                    error_message=tf.error_message,
+                    stack_trace=tf.stack_trace,
+                    log_snippet=tf.log_snippet,
+                )
+            )
+
+        # Build result
+        result = JobTestFailuresResult(
+            job_info=job_info,
+            test_failures=job_test_failures,
+            total_failures=len(job_test_failures),
+        )
+
+        return result.model_dump()
+
+    except BuildkiteAPIError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool(name="ciwatch.get_test_analytics_bulk")
+async def get_test_analytics_bulk(
+    test_nodeids: list[str],
+    suite_slug: str = "ci-1",
+) -> dict:
+    """Get Buildkite Analytics data for multiple tests in batch.
+
+    Args:
+        test_nodeids: List of full pytest nodeids
+                      (e.g., ["tests/foo.py::test_bar", "tests/baz.py::test_qux[param]"])
+        suite_slug: Test suite slug (default: ci-1)
+
+    Returns:
+        Dict with results, not_found, multiple_matches, total_checked, and warnings
+    """
+    try:
+        # Initialize Buildkite client
+        client = BuildkiteClient()
+
+        # Warn if too many tests
+        warnings = []
+        if len(test_nodeids) > 50:
+            warnings.append(f"Large batch ({len(test_nodeids)} tests) may be slow. Consider splitting.")
+
+        # Parse all nodeids into (scope, name) tuples
+        parsed_tests = []
+        for nodeid in test_nodeids:
+            scope, name = parse_test_nodeid(nodeid)
+            parsed_tests.append((nodeid, scope, name))
+
+        # Batch fetch all tests from Analytics
+        all_tests = client.list_analytics_tests(suite_slug=suite_slug, limit=100)
+
+        # Batch fetch flaky tests
+        flaky_tests = client.list_analytics_tests(suite_slug=suite_slug, state="flaky", limit=100)
+        flaky_ids = {t["id"] for t in flaky_tests}
+
+        # Batch fetch recently failed tests
+        failed_tests = client.list_analytics_tests(
+            suite_slug=suite_slug, order="recently_failed", limit=100
+        )
+        recently_failed_ids = {t["id"] for t in failed_tests[:20]}
+
+        # Match each input nodeid
+        results = []
+        not_found = []
+        multiple_matches = {}
+
+        for nodeid, scope, test_name in parsed_tests:
+            # Find matching tests in analytics
+            # Strategy: exact scope match, fuzzy name match for parametrized tests
+            matches = []
+            for test in all_tests:
+                test_scope = test.get("scope", "")
+                test_location = test.get("location", "")
+                analytics_name = test.get("name", "")
+
+                # Scope must match exactly (if we have a scope)
+                if scope and test_scope and scope != test_scope:
+                    continue
+
+                # For name matching:
+                # - Exact match: test_name == analytics_name
+                # - Parametrized match: base name matches (e.g., "test_bar" in "test_bar[param1]")
+                # - Base match: analytics_name matches if test_name is base (no brackets)
+
+                # Extract base name (without parameters)
+                base_name = test_name.split("[")[0] if "[" in test_name else test_name
+                analytics_base = analytics_name.split("[")[0] if "[" in analytics_name else analytics_name
+
+                if test_name == analytics_name or base_name == analytics_base:
+                    matches.append(test)
+
+            if len(matches) == 0:
+                not_found.append(nodeid)
+            elif len(matches) == 1:
+                test = matches[0]
+                results.append(
+                    TestAnalyticsInfo(
+                        test_nodeid=nodeid,
+                        test_id=test["id"],
+                        test_name=test["name"],
+                        scope=test.get("scope", scope),
+                        location=test.get("location"),
+                        web_url=test.get("web_url"),
+                        is_flaky=test["id"] in flaky_ids,
+                        recently_failed=test["id"] in recently_failed_ids,
+                        note=None,
+                    )
+                )
+            else:
+                # Multiple matches
+                multiple_matches[nodeid] = [
+                    {
+                        "id": t["id"],
+                        "name": t["name"],
+                        "scope": t.get("scope", ""),
+                        "location": t.get("location", ""),
+                    }
+                    for t in matches
+                ]
+
+        # Build result
+        result = TestAnalyticsBulkResult(
+            results=results,
+            not_found=not_found,
+            multiple_matches=multiple_matches,
+            total_checked=len(test_nodeids),
+            warnings=warnings,
+        )
+
+        return result.model_dump()
 
     except BuildkiteAPIError as e:
         return {"error": str(e)}

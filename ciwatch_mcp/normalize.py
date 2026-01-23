@@ -251,6 +251,30 @@ def generate_failure_key(failure: TestFailure) -> str:
     return hashlib.sha256(key_string.encode()).hexdigest()[:16]
 
 
+def parse_test_nodeid(nodeid: str) -> tuple[str, str]:
+    """Parse pytest nodeid into scope and name.
+
+    Args:
+        nodeid: Full pytest nodeid (e.g., "tests/foo.py::test_bar[param]")
+
+    Returns:
+        (scope, name) tuple:
+        - scope: File path (e.g., "tests/foo.py")
+        - name: Test name (e.g., "test_bar[param]" or "TestClass::test_method")
+
+    Examples:
+        "tests/foo.py::test_bar" → ("tests/foo.py", "test_bar")
+        "tests/foo.py::test_bar[param1]" → ("tests/foo.py", "test_bar[param1]")
+        "tests/foo.py::TestClass::test_method" → ("tests/foo.py", "TestClass::test_method")
+    """
+    if "::" in nodeid:
+        parts = nodeid.split("::", 1)
+        return parts[0], parts[1]
+    else:
+        # Fallback for malformed nodeid
+        return "", nodeid
+
+
 def find_test_outcome_in_log(log_text: str, test_nodeid: str) -> dict:
     """Find specific test outcome in pytest log.
 

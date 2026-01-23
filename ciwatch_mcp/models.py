@@ -71,3 +71,46 @@ class ScanResult(BaseModel):
     failed_jobs: int
     failures: list[FailureClassification]
     scan_timestamp: datetime
+
+
+class JobTestFailure(BaseModel):
+    """Test failure extracted from a specific job."""
+
+    test_nodeid: str  # Full pytest nodeid: "tests/foo.py::test_bar[param]"
+    scope: str        # Parsed scope: "tests/foo.py"
+    test_name: str    # Parsed name: "test_bar[param]"
+    error_message: Optional[str] = None
+    stack_trace: Optional[str] = None
+    log_snippet: Optional[str] = None
+
+
+class JobTestFailuresResult(BaseModel):
+    """Result from get_job_test_failures tool."""
+
+    job_info: dict
+    test_failures: list[JobTestFailure]
+    total_failures: int
+
+
+class TestAnalyticsInfo(BaseModel):
+    """Analytics info for a single test."""
+
+    test_nodeid: str
+    test_id: str  # Buildkite Analytics test ID
+    test_name: str
+    scope: str
+    location: Optional[str] = None
+    web_url: Optional[str] = None
+    is_flaky: bool = False
+    recently_failed: bool = False
+    note: Optional[str] = None
+
+
+class TestAnalyticsBulkResult(BaseModel):
+    """Result from get_test_analytics_bulk tool."""
+
+    results: list[TestAnalyticsInfo]
+    not_found: list[str]
+    multiple_matches: dict[str, list[dict]]
+    total_checked: int
+    warnings: list[str]
