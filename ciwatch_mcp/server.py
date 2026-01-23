@@ -179,29 +179,29 @@ async def scan_latest_nightly(
             repo_path = Path(repo_path_str)
 
         # 1. Get latest nightly build
-        # Note: message_filter not supported by API, so we get latest builds and filter client-side
+        # Nightly builds are identified by source="schedule" (more reliable than message text)
         builds_data = client.list_builds(
             pipeline=pipeline,
             branch=branch,
-            limit=20,  # Get more builds to ensure we find a completed nightly
+            limit=50,  # Fetch enough to ensure we find a scheduled build
         )
 
         if not builds_data:
             return {"error": "No builds found"}
 
-        # Filter for nightly builds that are not in initial states
+        # Filter for scheduled builds (nightly/daily runs) that are analyzable
         # Accept: passed, failed, failing, canceled (exclude: scheduled, running, canceling)
         # "failing" = build in progress but has failures (good enough for CI watch)
         analyzable_states = ["passed", "failed", "failing", "canceled"]
         nightly_builds = [
             b for b in builds_data
-            if "nightly" in b.get("message", "").lower()
+            if b.get("source") == "schedule"
             and b.get("state") in analyzable_states
         ]
 
         if not nightly_builds:
-            # Fallback: try just "nightly" in message without state filter
-            nightly_builds = [b for b in builds_data if "nightly" in b.get("message", "").lower()]
+            # Fallback: try scheduled builds without state filter
+            nightly_builds = [b for b in builds_data if b.get("source") == "schedule"]
 
         if not nightly_builds:
             # Final fallback: latest build in analyzable state
