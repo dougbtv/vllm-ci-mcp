@@ -3,7 +3,7 @@
 from typing import Optional
 
 from .assessment import assess_test_history, generate_summary
-from .cli import CLIError, run_bk_build_list, run_bk_job_list, run_bk_job_log
+from .buildkite_api import BuildkiteAPIError, BuildkiteClient
 from .config import (
     ESTIMATED_LOG_SIZE_PER_JOB,
     MAX_BUILDS_FOR_TEST_HISTORY,
@@ -60,6 +60,7 @@ async def find_test_in_job(
     job_info: dict,
     budget: ResourceBudget,
     include_logs: bool,
+    client: BuildkiteClient,
 ) -> Optional[dict]:
     """Search for test in a single job's logs.
 
@@ -70,6 +71,7 @@ async def find_test_in_job(
         job_info: Job info dict from bk
         budget: Resource budget tracker
         include_logs: Whether to include log excerpts in output
+        client: BuildkiteClient instance
 
     Returns:
         Dict with job outcome info, or None if test not found or budget exhausted
@@ -78,7 +80,7 @@ async def find_test_in_job(
         return None
 
     try:
-        log_text = run_bk_job_log(pipeline, build_number, job_info["id"])
+        log_text = client.get_job_log(pipeline, build_number, job_info["id"])
         budget.record_log_fetch(len(log_text))
 
         outcome = find_test_outcome_in_log(log_text, test_nodeid)
@@ -114,7 +116,7 @@ async def find_test_in_job(
 
         return result
 
-    except CLIError:
+    except BuildkiteAPIError:
         # Log fetch failed, skip this job
         return None
 
@@ -126,6 +128,7 @@ async def find_test_in_build(
     job_filter: Optional[str],
     budget: ResourceBudget,
     include_logs: bool,
+    client: BuildkiteClient,
 ) -> TestOutcome:
     """Search for test across all jobs in a build.
 
@@ -142,6 +145,7 @@ async def find_test_in_build(
         job_filter: Optional job name filter
         budget: Resource budget tracker
         include_logs: Whether to include log excerpts
+        client: BuildkiteClient instance
 
     Returns:
         TestOutcome with aggregated results
@@ -149,8 +153,9 @@ async def find_test_in_build(
     outcome = TestOutcome()
 
     try:
-        all_jobs = run_bk_job_list(pipeline, build_number)
-    except CLIError:
+        build_data = client.get_build(pipeline, build_number)
+        all_jobs = build_data.get("jobs", [])
+    except BuildkiteAPIError:
         # Build not accessible, return unknown
         return outcome
 
@@ -173,7 +178,7 @@ async def find_test_in_build(
             break
 
         result = await find_test_in_job(
-            test_nodeid, pipeline, build_number, job, budget, include_logs
+            test_nodeid, pipeline, build_number, job, budget, include_logs, client
         )
 
         if result:
@@ -193,7 +198,7 @@ async def find_test_in_build(
                 break
 
             result = await find_test_in_job(
-                test_nodeid, pipeline, build_number, job, budget, include_logs
+                test_nodeid, pipeline, build_number, job, budget, include_logs, client
             )
 
             if result:
@@ -232,6 +237,9 @@ async def get_test_history(
     Returns:
         Dict with timeline, assessment, and summary
     """
+    # Initialize Buildkite client
+    client = BuildkiteClient()
+
     # Initialize budget tracker
     budget = ResourceBudget()
 
@@ -239,12 +247,12 @@ async def get_test_history(
     # NOTE: build_query parameter is deprecated and ignored to avoid timeouts
     # (message_filter uses client-side filtering which is slow)
     try:
-        builds_raw = run_bk_build_list(
+        builds_raw = client.list_builds(
             pipeline=pipeline,
             branch=branch,
             limit=lookback_builds,
         )
-    except CLIError as e:
+    except BuildkiteAPIError as e:
         return {"error": str(e)}
 
     if not builds_raw:
@@ -273,6 +281,7 @@ async def get_test_history(
             job_filter=job_filter,
             budget=budget,
             include_logs=include_logs,
+            client=client,
         )
 
         timeline.append({

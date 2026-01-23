@@ -21,9 +21,9 @@ MCP Server for vLLM CI monitoring. Scans Buildkite builds, extracts failures, cl
 ## Prerequisites
 
 - **Python 3.11+**
-- **Buildkite CLI**: `brew install buildkite/buildkite/bk`
-- **GitHub CLI** (optional): `brew install gh`
-- **Git** (optional, for owner inference): usually pre-installed
+- **Buildkite API Token**: Get from https://buildkite.com/user/api-access-tokens
+- **GitHub CLI** (optional): `brew install gh` - for matching known issues
+- **Git** (optional): For owner inference via git blame (usually pre-installed)
 
 ## Installation
 
@@ -39,10 +39,12 @@ pip install -e ".[dev]"
 
 ### Buildkite
 
-Set your Buildkite API token:
+Set your Buildkite API token (supports either variable name):
 
 ```bash
 export BUILDKITE_TOKEN="your-buildkite-token"
+# OR
+export BUILDKITE_API_TOKEN="your-buildkite-token"
 ```
 
 Get a token from: https://buildkite.com/user/api-access-tokens
@@ -390,7 +392,8 @@ Failures are deduplicated using a stable hash of:
 
 - `models.py`: Pydantic schemas for build/job/failure data
 - `config.py`: Constants and defaults
-- `cli.py`: Subprocess wrappers for `bk`, `gh`, `git`
+- `buildkite_api.py`: Buildkite REST API client (replaces CLI usage)
+- `cli.py`: Subprocess wrappers for `gh`, `git`
 - `normalize.py`: Pytest log parsing and deduplication
 - `classify.py`: Classification heuristics
 - `owners.py`: CODEOWNERS parsing and git blame
@@ -403,7 +406,7 @@ Failures are deduplicated using a stable hash of:
 ### Data Flow
 
 ```
-Buildkite API (via bk CLI) → Parse builds/jobs → Fetch logs →
+Buildkite REST API → Parse builds/jobs → Fetch logs →
 Extract test failures → Classify → Deduplicate → Render markdown
 ```
 
@@ -429,12 +432,16 @@ black ciwatch_mcp/ tests/
 
 ## Troubleshooting
 
-### `bk CLI not found`
+### `BUILDKITE_TOKEN or BUILDKITE_API_TOKEN environment variable not set`
 
-Install Buildkite CLI:
+Set your Buildkite API token:
 ```bash
-brew install buildkite/buildkite/bk
+export BUILDKITE_TOKEN="your-token"
+# OR
+export BUILDKITE_API_TOKEN="your-token"
 ```
+
+Get a token from: https://buildkite.com/user/api-access-tokens
 
 ### `gh CLI not found`
 

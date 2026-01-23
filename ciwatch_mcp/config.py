@@ -8,12 +8,21 @@ DEFAULT_PIPELINE = "vllm/ci"
 DEFAULT_REPO = "vllm-project/vllm"
 DEFAULT_BRANCH = "main"
 
-# CLI timeouts (seconds)
-BK_BUILD_TIMEOUT = 30
-BK_JOB_TIMEOUT = 30
-BK_LOG_TIMEOUT = 60
+# Buildkite API configuration
+BUILDKITE_ORG = "vllm"  # Default org slug
+BUILDKITE_API_BASE = "https://api.buildkite.com/v2"
+BUILDKITE_ANALYTICS_BASE = "https://api.buildkite.com/v2/analytics"
+BK_API_TIMEOUT = 30  # seconds
+BK_LOG_API_TIMEOUT = 60  # seconds
+
+# CLI timeouts (seconds) - for gh and git
 GH_ISSUE_TIMEOUT = 30
 GIT_BLAME_TIMEOUT = 10
+
+# Legacy timeout constants (kept for backward compatibility)
+BK_BUILD_TIMEOUT = BK_API_TIMEOUT
+BK_JOB_TIMEOUT = BK_API_TIMEOUT
+BK_LOG_TIMEOUT = BK_LOG_API_TIMEOUT
 
 # Parsing limits
 MAX_LOG_SNIPPET_LENGTH = 500

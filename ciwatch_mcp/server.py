@@ -8,16 +8,8 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from .buildkite_api import BuildkiteAPIError, BuildkiteClient
 from .classify import classify_failure, deduplicate_failures
-from .cli import (
-    CLIError,
-    run_bk_analytics_test_detail,
-    run_bk_analytics_test_runs,
-    run_bk_analytics_tests,
-    run_bk_build_list,
-    run_bk_job_list,
-    run_bk_job_log,
-)
 from .config import (
     DEFAULT_BRANCH,
     DEFAULT_PIPELINE,
@@ -177,6 +169,9 @@ async def scan_latest_nightly(
         Dict with build_info, failures, daily_findings_text, standup_summary_text
     """
     try:
+        # Initialize Buildkite client
+        client = BuildkiteClient()
+
         # Get repo path from env if set
         repo_path = None
         repo_path_str = os.environ.get("VLLM_REPO_PATH")
@@ -184,20 +179,40 @@ async def scan_latest_nightly(
             repo_path = Path(repo_path_str)
 
         # 1. Get latest nightly build
-        builds_data = run_bk_build_list(
+        # Note: message_filter not supported by API, so we get latest builds and filter client-side
+        builds_data = client.list_builds(
             pipeline=pipeline,
             branch=branch,
-            limit=1,
-            message_filter="nightly"
+            limit=20,  # Get more builds to ensure we find a completed nightly
         )
 
         if not builds_data:
             return {"error": "No builds found"}
 
-        build_info = parse_build_json(builds_data[0])
+        # Filter for nightly builds that are not in initial states
+        # Accept: passed, failed, failing, canceled (exclude: scheduled, running, canceling)
+        # "failing" = build in progress but has failures (good enough for CI watch)
+        analyzable_states = ["passed", "failed", "failing", "canceled"]
+        nightly_builds = [
+            b for b in builds_data
+            if "nightly" in b.get("message", "").lower()
+            and b.get("state") in analyzable_states
+        ]
+
+        if not nightly_builds:
+            # Fallback: try just "nightly" in message without state filter
+            nightly_builds = [b for b in builds_data if "nightly" in b.get("message", "").lower()]
+
+        if not nightly_builds:
+            # Final fallback: latest build in analyzable state
+            analyzable_builds = [b for b in builds_data if b.get("state") in analyzable_states]
+            nightly_builds = analyzable_builds[:1] if analyzable_builds else builds_data[:1]
+
+        build_info = parse_build_json(nightly_builds[0])
 
         # 2. Get all jobs for this build
-        jobs_data = run_bk_job_list(pipeline=pipeline, build_number=build_info.build_number)
+        build_data = client.get_build(pipeline=pipeline, build_number=build_info.build_number)
+        jobs_data = build_data.get("jobs", [])
 
         jobs = [parse_job_json(j, build_info.build_number) for j in jobs_data]
         failed_jobs = [j for j in jobs if not j.passed]
@@ -206,7 +221,7 @@ async def scan_latest_nightly(
         all_failures = []
         for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
             try:
-                log_text = run_bk_job_log(
+                log_text = client.get_job_log(
                     pipeline=pipeline,
                     build_number=build_info.build_number,
                     job_id=job.job_id,
@@ -230,7 +245,7 @@ async def scan_latest_nightly(
 
                     all_failures.append(classified)
 
-            except CLIError as e:
+            except BuildkiteAPIError as e:
                 # Log fetch failed, skip this job but continue
                 continue
 
@@ -267,7 +282,7 @@ async def scan_latest_nightly(
 
         return response
 
-    except CLIError as e:
+    except BuildkiteAPIError as e:
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
@@ -296,6 +311,9 @@ async def scan_build(
         Dict with build_info, failures, daily_findings_text, standup_summary_text
     """
     try:
+        # Initialize Buildkite client
+        client = BuildkiteClient()
+
         # Get repo path from env if set
         repo_path = None
         repo_path_str = os.environ.get("VLLM_REPO_PATH")
@@ -312,8 +330,9 @@ async def scan_build(
             else:
                 return {"error": "Could not parse build number from URL"}
 
-        # Get build data by fetching job list (which includes build info)
-        jobs_data = run_bk_job_list(pipeline=pipeline, build_number=build_number)
+        # Get build data directly from API
+        build_data = client.get_build(pipeline=pipeline, build_number=build_number)
+        jobs_data = build_data.get("jobs", [])
 
         if not jobs_data:
             return {"error": f"No jobs found for build {build_number}"}
@@ -340,7 +359,7 @@ async def scan_build(
         all_failures = []
         for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
             try:
-                log_text = run_bk_job_log(
+                log_text = client.get_job_log(
                     pipeline=pipeline, build_number=build_number, job_id=job.job_id
                 )
 
@@ -361,7 +380,7 @@ async def scan_build(
 
                     all_failures.append(classified)
 
-            except CLIError:
+            except BuildkiteAPIError:
                 # Log fetch failed, skip this job
                 continue
 
@@ -398,7 +417,7 @@ async def scan_build(
 
         return response
 
-    except CLIError as e:
+    except BuildkiteAPIError as e:
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
@@ -491,15 +510,18 @@ async def test_history_analytics(
         Dict with test info and flaky status
     """
     try:
+        # Initialize Buildkite client
+        client = BuildkiteClient()
+
         # Search for test in all tests
-        all_tests = run_bk_analytics_tests(suite_slug=suite_slug, limit=2000)
+        all_tests = client.list_analytics_tests(suite_slug=suite_slug, limit=100)
 
         # Match test by name
         matching_tests = [t for t in all_tests if test_name in t.get("name", "")]
 
         if not matching_tests:
             # Try checking flaky tests specifically
-            flaky_tests = run_bk_analytics_tests(suite_slug=suite_slug, state="flaky", limit=1000)
+            flaky_tests = client.list_analytics_tests(suite_slug=suite_slug, state="flaky", limit=100)
             flaky_matches = [t for t in flaky_tests if test_name in t.get("name", "")]
 
             if flaky_matches:
@@ -528,11 +550,11 @@ async def test_history_analytics(
         test = matching_tests[0]
 
         # Check if test appears in flaky list
-        flaky_tests = run_bk_analytics_tests(suite_slug=suite_slug, state="flaky", limit=1000)
+        flaky_tests = client.list_analytics_tests(suite_slug=suite_slug, state="flaky", limit=100)
         is_flaky = any(t["id"] == test["id"] for t in flaky_tests)
 
         # Check if test appears in recently failed list
-        failed_tests = run_bk_analytics_tests(suite_slug=suite_slug, order="recently_failed", limit=100)
+        failed_tests = client.list_analytics_tests(suite_slug=suite_slug, order="recently_failed", limit=100)
         recently_failed = any(t["id"] == test["id"] for t in failed_tests[:20])
 
         return {
@@ -546,7 +568,7 @@ async def test_history_analytics(
             "suggestion": f"View detailed analytics in web UI: {test.get('web_url', 'N/A')}",
         }
 
-    except CLIError as e:
+    except BuildkiteAPIError as e:
         return {"error": str(e)}
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
