@@ -117,6 +117,7 @@ class BuildkiteClient:
         branch: Optional[str] = None,
         limit: int = 30,
         state: Optional[str] = None,
+        created_from: Optional[str] = None,
     ) -> list[dict]:
         """Get build list from Buildkite API.
 
@@ -125,6 +126,7 @@ class BuildkiteClient:
             branch: Git branch to filter by
             limit: Number of builds to return (max 100 per page)
             state: Optional state filter (e.g., "failed", "passed")
+            created_from: Optional ISO 8601 timestamp to filter builds created on or after this time
 
         Returns:
             List of build dicts
@@ -140,6 +142,8 @@ class BuildkiteClient:
             params["branch"] = branch
         if state:
             params["state"] = state
+        if created_from:
+            params["created_from"] = created_from
 
         try:
             response = self._request("GET", url, params=params)

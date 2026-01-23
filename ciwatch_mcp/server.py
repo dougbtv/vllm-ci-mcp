@@ -180,10 +180,15 @@ async def scan_latest_nightly(
 
         # 1. Get latest nightly build
         # Nightly builds are identified by source="schedule" (more reliable than message text)
+        # Use created_from to narrow search window (nightlies run daily, so check last 2 days)
+        from datetime import datetime, timedelta, timezone
+        two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+
         builds_data = client.list_builds(
             pipeline=pipeline,
             branch=branch,
-            limit=50,  # Fetch enough to ensure we find a scheduled build
+            limit=100,  # Generous limit, created_from keeps actual results ~70-80 builds
+            created_from=two_days_ago,
         )
 
         if not builds_data:
