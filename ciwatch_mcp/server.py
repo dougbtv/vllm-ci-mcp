@@ -229,6 +229,25 @@ async def scan_latest_nightly(
 
     Returns:
         Dict with build_info, failures, daily_findings_text, standup_summary_text
+
+        The "failures" list contains already-extracted, deduplicated test failures.
+        Each failure has:
+        - test_failure.test_name: The pytest nodeid (e.g., "tests/foo.py::test_bar")
+        - category: Classification (NEW_REGRESSION, KNOWN_TRACKED, etc.)
+        - test_failure.job_name: Which job it came from
+
+    IMPORTANT - Next step to classify flaky vs real issues:
+        Don't call get_job_test_failures! The scan already extracted test failures.
+        Instead, extract the test nodeids and check analytics:
+
+        # Extract test nodeids from the failures list
+        test_nodeids = [f["test_failure"]["test_name"] for f in result["failures"]]
+
+        # Batch check if they're flaky
+        analytics = await get_test_analytics_bulk(test_nodeids)
+
+        # Report: tests with is_flaky=True can be ignored,
+        #         tests in not_found likely need investigation
     """
     try:
         # Initialize Buildkite client
@@ -376,6 +395,25 @@ async def scan_build(
 
     Returns:
         Dict with build_info, failures, daily_findings_text, standup_summary_text
+
+        The "failures" list contains already-extracted, deduplicated test failures.
+        Each failure has:
+        - test_failure.test_name: The pytest nodeid (e.g., "tests/foo.py::test_bar")
+        - category: Classification (NEW_REGRESSION, KNOWN_TRACKED, etc.)
+        - test_failure.job_name: Which job it came from
+
+    IMPORTANT - Next step to classify flaky vs real issues:
+        Don't call get_job_test_failures! The scan already extracted test failures.
+        Instead, extract the test nodeids and check analytics:
+
+        # Extract test nodeids from the failures list
+        test_nodeids = [f["test_failure"]["test_name"] for f in result["failures"]]
+
+        # Batch check if they're flaky
+        analytics = await get_test_analytics_bulk(test_nodeids)
+
+        # Report: tests with is_flaky=True can be ignored,
+        #         tests in not_found likely need investigation
     """
     try:
         # Initialize Buildkite client
@@ -672,6 +710,14 @@ async def get_job_test_failures(
 ) -> dict:
     """Extract pytest test failures from a specific job's logs.
 
+    When to use this:
+        - When scan_latest_nightly/scan_build doesn't provide enough detail about a job
+        - When you want to see ALL tests from a specific job (not just deduplicated failures)
+        - When investigating a particular job mentioned in scan results
+
+    Note: Only works for pytest-running jobs. Infrastructure jobs (docker build, etc.)
+    won't have test output. Look for jobs with "Test" in the name.
+
     Args:
         build_id_or_url: Build number (e.g., "48161") or full Buildkite URL
         job_name_or_id: Job name (e.g., "Entrypoints Test") or job UUID
@@ -683,6 +729,12 @@ async def get_job_test_failures(
 
     Returns:
         Dict with job_info, test_failures, and total_failures
+
+    Workflow tip:
+        After extracting test failures, check if they're flaky:
+
+        test_nodeids = [f["test_nodeid"] for f in result["test_failures"]]
+        analytics = await get_test_analytics_bulk(test_nodeids)
     """
     try:
         # Initialize Buildkite client
@@ -768,6 +820,9 @@ async def get_test_analytics_bulk(
 ) -> dict:
     """Get Buildkite Analytics data for multiple tests in batch.
 
+    Use this to classify test failures as flaky vs new regressions.
+    Fast batch operation - only 2-3 API calls regardless of test count.
+
     Args:
         test_nodeids: List of full pytest nodeids
                       (e.g., ["tests/foo.py::test_bar", "tests/baz.py::test_qux[param]"])
@@ -775,6 +830,15 @@ async def get_test_analytics_bulk(
 
     Returns:
         Dict with results, not_found, multiple_matches, total_checked, and warnings
+
+        - results: Tests found in analytics with is_flaky flag
+        - not_found: Tests not in analytics (likely new tests or regressions)
+        - multiple_matches: Tests with ambiguous matches (rare)
+
+    Interpretation:
+        - is_flaky=true: Known flaky test, can likely ignore
+        - not_found: New test or new regression, needs investigation
+        - recently_failed=true: Has failed recently (last 20 runs)
     """
     try:
         # Initialize Buildkite client
