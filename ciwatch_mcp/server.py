@@ -181,12 +181,19 @@ def _match_job_by_name(
         # Case-insensitive substring match
         pattern = job_name_or_id.lower()
         matches = [j for j in jobs if pattern in j.get("name", "").lower()]
-        if len(matches) == 1:
-            return matches[0], None
-        elif len(matches) == 0:
+
+        if len(matches) == 0:
             available = [j.get("name") for j in jobs]
             return None, f"No jobs match '{job_name_or_id}'. Available: {available}"
+        elif len(matches) == 1:
+            return matches[0], None
         else:
+            # Multiple matches - check if one is an exact match (prefer it)
+            exact_matches = [j for j in matches if j.get("name", "").lower() == pattern]
+            if len(exact_matches) == 1:
+                return exact_matches[0], None
+
+            # No exact match or multiple exact matches - return candidates
             candidates = [{"id": j["id"], "name": j["name"]} for j in matches]
             return None, f"Multiple matches. Candidates: {candidates}"
 
