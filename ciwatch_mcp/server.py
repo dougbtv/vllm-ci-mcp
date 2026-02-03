@@ -577,6 +577,10 @@ async def analyze_main_branch(
             }
 
         # 4. Deduplicate and aggregate
+        # First, calculate which builds had failures (before we modify the dicts)
+        builds_with_failures_set = set(f["_build_number"] for f in all_failures)
+        builds_with_failures = len(builds_with_failures_set)
+
         # Group by failure_key to count occurrences
         from collections import defaultdict
 
@@ -621,10 +625,6 @@ async def analyze_main_branch(
         aggregated_failures = aggregated_failures[:max_failures]
 
         # 5. Build summary stats
-        builds_with_failures = len([b for b in build_summaries if any(
-            f["_build_number"] == b["build_number"] for f in all_failures
-        )])
-
         persistent_count = sum(1 for f in aggregated_failures if f["recurrence_rate"] >= DEFAULT_PERSISTENT_THRESHOLD)
         intermittent_count = len(aggregated_failures) - persistent_count
 
