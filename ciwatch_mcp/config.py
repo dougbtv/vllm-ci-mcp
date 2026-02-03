@@ -48,3 +48,8 @@ MAX_BUILDS_FOR_TEST_HISTORY = 50  # Default lookback (commit-level tracking)
 MAX_JOBS_PER_BUILD_FOR_TEST_HISTORY = 20  # Avoid scanning hundreds of jobs
 MAX_LOG_BYTES_FOR_TEST_HISTORY = 200_000  # 200KB total across all logs
 ESTIMATED_LOG_SIZE_PER_JOB = 10_000  # Conservative estimate for budget planning
+
+# Main branch analysis defaults
+DEFAULT_MAIN_ANALYSIS_HOURS = 24
+DEFAULT_MAIN_ANALYSIS_BUILDS = 5
+DEFAULT_PERSISTENT_THRESHOLD = 0.5  # 50% recurrence = persistent

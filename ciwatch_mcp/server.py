@@ -13,6 +13,9 @@ from .classify import classify_failure, deduplicate_failures
 from .cli import CLIError
 from .config import (
     DEFAULT_BRANCH,
+    DEFAULT_MAIN_ANALYSIS_BUILDS,
+    DEFAULT_MAIN_ANALYSIS_HOURS,
+    DEFAULT_PERSISTENT_THRESHOLD,
     DEFAULT_PIPELINE,
     DEFAULT_REPO,
     MAX_BUILDS_FOR_TEST_HISTORY,
@@ -20,8 +23,10 @@ from .config import (
     VLLM_REPO_PATH,
 )
 from .models import (
+    FailureClassificationWithRecurrence,
     JobTestFailure,
     JobTestFailuresResult,
+    MainBranchAnalysisResult,
     ScanResult,
     TestAnalyticsInfo,
     TestAnalyticsBulkResult,
@@ -375,6 +380,322 @@ async def scan_latest_nightly(
             standup_summary = render_standup_summary(result, jobs=jobs)
             response["daily_findings_text"] = daily_findings
             response["standup_summary_text"] = standup_summary
+
+        return response
+
+    except BuildkiteAPIError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        return {"error": f"Unexpected error: {str(e)}"}
+
+
+@mcp.tool(name="ciwatch.analyze_main_branch")
+async def analyze_main_branch(
+    pipeline: str = DEFAULT_PIPELINE,
+    branch: str = DEFAULT_BRANCH,
+    repo: str = DEFAULT_REPO,
+    search_github: bool = True,
+    detail_level: str = "summary",
+    max_builds: int = DEFAULT_MAIN_ANALYSIS_BUILDS,
+    max_failures: int = 50,
+    hours_lookback: int = DEFAULT_MAIN_ANALYSIS_HOURS,
+    exclude_scheduled: bool = True,
+) -> dict:
+    """Analyze recent failures on main branch from commit-triggered builds.
+
+    Unlike scan_latest_nightly which analyzes a single scheduled build, this function
+    scans multiple recent commit-triggered builds to identify what tests are currently
+    failing on main and how frequently they fail.
+
+    Args:
+        pipeline: Buildkite pipeline (default: vllm/ci)
+        branch: Branch to analyze (default: main)
+        repo: GitHub repo for issue search (default: vllm-project/vllm)
+        search_github: Whether to search GitHub for known issues (default: True)
+        detail_level: Output detail level - "minimal", "summary", or "full" (default: summary)
+        max_builds: Maximum number of builds to analyze (default: 5)
+        max_failures: Maximum number of unique failures to return (default: 50)
+        hours_lookback: Time window in hours to search for builds (default: 24)
+        exclude_scheduled: Exclude scheduled/nightly builds (default: True)
+
+    Returns:
+        Dict with analysis_window, summary, failures (with recurrence data), scan_timestamp
+
+        Example workflow:
+        1. Call analyze_main_branch(hours_lookback=24, max_builds=5)
+        2. Extract pytest nodeids from failures
+        3. Call get_test_analytics_bulk(nodeids) to check flakiness
+        4. Classify: flaky (ignore), new regressions (investigate), persistent (critical)
+    """
+    try:
+        client = BuildkiteClient()
+        repo_path = Path(os.getenv("VLLM_REPO_PATH", "")) if os.getenv("VLLM_REPO_PATH") else VLLM_REPO_PATH
+
+        # Calculate time window
+        from datetime import timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        start_time = now - timedelta(hours=hours_lookback)
+
+        # 1. Fetch builds in the time window (over-fetch to account for filtering)
+        builds_data = client.list_builds(
+            pipeline=pipeline,
+            branch=branch,
+            created_from=start_time.isoformat(),
+            limit=100,  # Over-fetch to ensure we get enough after filtering
+        )
+
+        if not builds_data:
+            return {
+                "error": f"No builds found in the last {hours_lookback} hours",
+                "analysis_window": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": now.isoformat(),
+                    "hours_lookback": hours_lookback,
+                },
+            }
+
+        # 2. Filter builds
+        analyzable_states = ["passed", "failed", "failing", "canceled"]
+        filtered_builds = []
+
+        for build in builds_data:
+            # Skip if not in analyzable state
+            if build.get("state") not in analyzable_states:
+                continue
+
+            # Skip scheduled builds if requested
+            if exclude_scheduled and build.get("source") == "schedule":
+                continue
+
+            # Skip passed builds (optimization - only process failed/failing)
+            if build.get("state") == "passed":
+                continue
+
+            filtered_builds.append(build)
+
+            # Stop once we have enough
+            if len(filtered_builds) >= max_builds:
+                break
+
+        if not filtered_builds:
+            return {
+                "error": f"No failed builds found in the last {hours_lookback} hours (after filtering)",
+                "analysis_window": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": now.isoformat(),
+                    "hours_lookback": hours_lookback,
+                    "total_builds_in_window": len(builds_data),
+                },
+            }
+
+        # 3. Process each build and collect failures
+        all_failures = []
+        build_summaries = []
+        builds_scanned = 0
+
+        for build_data in filtered_builds:
+            build_number = str(build_data.get("number", ""))
+            commit = build_data.get("commit", "")[:8]
+            state = build_data.get("state", "")
+            created_at = build_data.get("created_at", "")
+
+            build_summaries.append({
+                "build_number": build_number,
+                "commit": commit,
+                "state": state,
+                "created_at": created_at,
+            })
+
+            try:
+                # Get full build data with jobs
+                full_build = client.get_build(pipeline=pipeline, build_number=build_number)
+                jobs_data = full_build.get("jobs", [])
+
+                # Parse and filter to failed jobs
+                jobs = [parse_job_json(j, build_number) for j in jobs_data]
+                failed_jobs = [j for j in jobs if not j.passed]
+
+                # Extract failures from failed jobs (limit to avoid timeouts)
+                for job in failed_jobs[:MAX_FAILED_JOBS_TO_PROCESS]:
+                    try:
+                        log_text = client.get_job_log(
+                            pipeline=pipeline,
+                            build_number=build_number,
+                            job_id=job.job_id,
+                        )
+
+                        test_failures = extract_test_failures_from_log(log_text, job.job_name)
+
+                        # Classify each failure
+                        for test_failure in test_failures:
+                            classified = classify_failure(
+                                test_failure, repo=repo, search_github=search_github
+                            )
+
+                            # Optional: infer owner
+                            if repo_path:
+                                test_file = test_failure.test_name.split("::")[0]
+                                owner, confidence = infer_owner(test_file, repo_path)
+                                classified.owner = owner
+                                classified.owner_confidence = confidence
+
+                            # Track build context
+                            classified_dict = classified.model_dump()
+                            classified_dict["_build_number"] = build_number
+                            classified_dict["_commit"] = commit
+                            all_failures.append(classified_dict)
+
+                    except BuildkiteAPIError:
+                        # Log fetch failed, skip this job but continue
+                        continue
+
+                builds_scanned += 1
+
+            except BuildkiteAPIError:
+                # Build fetch failed, skip this build but continue
+                continue
+
+        if not all_failures:
+            return {
+                "analysis_window": {
+                    "start_time": start_time.isoformat(),
+                    "end_time": now.isoformat(),
+                    "hours_lookback": hours_lookback,
+                    "builds_scanned": builds_scanned,
+                    "builds_analyzed": build_summaries,
+                },
+                "summary": {
+                    "total_builds_scanned": builds_scanned,
+                    "builds_with_failures": 0,
+                    "total_unique_failures": 0,
+                    "persistent_failures": 0,
+                    "intermittent_failures": 0,
+                },
+                "failures": [],
+                "scan_timestamp": now.isoformat(),
+            }
+
+        # 4. Deduplicate and aggregate
+        # Group by failure_key to count occurrences
+        from collections import defaultdict
+
+        failure_groups = defaultdict(list)
+        for failure_dict in all_failures:
+            key = failure_dict["failure_key"]
+            failure_groups[key].append(failure_dict)
+
+        # Build aggregated failures with recurrence data
+        aggregated_failures = []
+        for key, failures_list in failure_groups.items():
+            # Use first failure as base
+            base_failure = failures_list[0]
+
+            # Extract build context
+            seen_builds = list(set(f["_build_number"] for f in failures_list))
+            seen_commits = list(set(f["_commit"] for f in failures_list))
+
+            # Create extended classification
+            occurrence_count = len(seen_builds)
+            recurrence_rate = occurrence_count / builds_scanned if builds_scanned > 0 else 0.0
+
+            # Remove temporary build tracking fields
+            base_failure.pop("_build_number", None)
+            base_failure.pop("_commit", None)
+
+            # Add recurrence fields
+            base_failure["occurrence_count"] = occurrence_count
+            base_failure["seen_in_builds"] = seen_builds
+            base_failure["seen_in_commits"] = seen_commits
+            base_failure["recurrence_rate"] = round(recurrence_rate, 2)
+
+            aggregated_failures.append(base_failure)
+
+        # Sort by recurrence_rate descending, then by occurrence_count
+        aggregated_failures.sort(
+            key=lambda f: (f["recurrence_rate"], f["occurrence_count"]),
+            reverse=True,
+        )
+
+        # Apply max_failures limit
+        aggregated_failures = aggregated_failures[:max_failures]
+
+        # 5. Build summary stats
+        builds_with_failures = len([b for b in build_summaries if any(
+            f["_build_number"] == b["build_number"] for f in all_failures
+        )])
+
+        persistent_count = sum(1 for f in aggregated_failures if f["recurrence_rate"] >= DEFAULT_PERSISTENT_THRESHOLD)
+        intermittent_count = len(aggregated_failures) - persistent_count
+
+        summary = {
+            "total_builds_scanned": builds_scanned,
+            "builds_with_failures": builds_with_failures,
+            "total_unique_failures": len(aggregated_failures),
+            "persistent_failures": persistent_count,
+            "intermittent_failures": intermittent_count,
+        }
+
+        # 6. Apply detail level filtering
+        # Convert dict format to model format for _apply_detail_level
+        from .models import FailureClassification
+
+        failure_models = []
+        for f_dict in aggregated_failures:
+            # Create base FailureClassification (without recurrence fields)
+            base_dict = {k: v for k, v in f_dict.items() if k not in [
+                "occurrence_count", "seen_in_builds", "seen_in_commits", "recurrence_rate"
+            ]}
+            base_model = FailureClassification(**base_dict)
+            failure_models.append(base_model)
+
+        failures_output = _apply_detail_level(failure_models, detail_level)
+
+        # Re-add recurrence fields after detail filtering
+        for i, f_dict in enumerate(aggregated_failures):
+            failures_output[i]["occurrence_count"] = f_dict["occurrence_count"]
+            failures_output[i]["seen_in_builds"] = f_dict["seen_in_builds"]
+            failures_output[i]["seen_in_commits"] = f_dict["seen_in_commits"]
+            failures_output[i]["recurrence_rate"] = f_dict["recurrence_rate"]
+
+        # 7. Build response
+        response = {
+            "analysis_window": {
+                "start_time": start_time.isoformat(),
+                "end_time": now.isoformat(),
+                "hours_lookback": hours_lookback,
+                "builds_scanned": builds_scanned,
+                "builds_analyzed": build_summaries,
+            },
+            "summary": summary,
+            "failures": failures_output,
+            "scan_timestamp": now.isoformat(),
+        }
+
+        # 8. Add rendered text only in full mode
+        if detail_level == "full":
+            # Build a simple text summary
+            text_lines = [
+                f"# Main Branch Analysis ({hours_lookback}h lookback)",
+                f"",
+                f"**Builds scanned:** {builds_scanned}",
+                f"**Unique failures:** {len(aggregated_failures)}",
+                f"**Persistent failures (≥50% recurrence):** {persistent_count}",
+                f"**Intermittent failures:** {intermittent_count}",
+                f"",
+                f"## Top Failures by Recurrence:",
+            ]
+
+            for i, failure in enumerate(aggregated_failures[:10], 1):
+                test_name = failure["test_failure"]["test_name"]
+                recurrence = failure["recurrence_rate"]
+                count = failure["occurrence_count"]
+                category = failure["category"]
+                text_lines.append(
+                    f"{i}. `{test_name}` - {recurrence*100:.0f}% ({count}/{builds_scanned}) [{category}]"
+                )
+
+            response["analysis_text"] = "\n".join(text_lines)
 
         return response
 

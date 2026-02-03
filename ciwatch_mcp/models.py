@@ -114,3 +114,21 @@ class TestAnalyticsBulkResult(BaseModel):
     multiple_matches: dict[str, list[dict]]
     total_checked: int
     warnings: list[str]
+
+
+class FailureClassificationWithRecurrence(FailureClassification):
+    """Extended classification for multi-build analysis."""
+
+    occurrence_count: int = 1  # How many builds this appeared in
+    seen_in_builds: list[str] = Field(default_factory=list)  # Build numbers
+    seen_in_commits: list[str] = Field(default_factory=list)  # Commit SHAs
+    recurrence_rate: float = 0.0  # occurrence_count / builds_scanned
+
+
+class MainBranchAnalysisResult(BaseModel):
+    """Result from analyzing main branch failures."""
+
+    analysis_window: dict  # start/end time, hours_lookback, builds_scanned
+    summary: dict  # total builds, builds with failures, unique failures, persistent vs intermittent
+    failures: list[FailureClassificationWithRecurrence]
+    scan_timestamp: datetime

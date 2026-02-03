@@ -172,7 +172,7 @@ Add to your Claude Desktop MCP config (`~/Library/Application Support/Claude/cla
 
 ### MCP Tools
 
-The server provides three MCP tools:
+The server provides the following MCP tools:
 
 #### 1. `ciwatch.scan_latest_nightly`
 
@@ -328,6 +328,109 @@ result = await ciwatch.test_history(
 - Budget limits prevent exhaustive search (max 20 jobs/build, 200KB logs total)
 - Fingerprint normalization is conservative - some variations may not be grouped
 - Requires builds exist on main branch (works best with CI on every commit)
+
+#### 5. `ciwatch.analyze_main_branch`
+
+Analyze recent failures on main branch from commit-triggered builds. Unlike `scan_latest_nightly` which analyzes a single scheduled build, this function scans multiple recent commit-triggered builds to identify what tests are currently failing on main and how frequently they fail.
+
+**Parameters:**
+- `pipeline` (str, default: `"vllm/ci"`): Buildkite pipeline slug
+- `branch` (str, default: `"main"`): Git branch to analyze
+- `repo` (str, default: `"vllm-project/vllm"`): GitHub repo for issue search
+- `search_github` (bool, default: `true`): Whether to search GitHub for known issues
+- `detail_level` (str, default: `"summary"`): Output detail level - `"minimal"`, `"summary"`, or `"full"`
+- `max_builds` (int, default: `5`): Maximum number of builds to analyze
+- `max_failures` (int, default: `50`): Maximum number of unique failures to return
+- `hours_lookback` (int, default: `24`): Time window in hours to search for builds
+- `exclude_scheduled` (bool, default: `true`): Exclude scheduled/nightly builds
+
+**Returns:**
+```json
+{
+  "analysis_window": {
+    "start_time": "2026-02-02T12:00:00Z",
+    "end_time": "2026-02-03T12:00:00Z",
+    "hours_lookback": 24,
+    "builds_scanned": 5,
+    "builds_analyzed": [
+      {"build_number": "48200", "commit": "abc123", "state": "failed", "created_at": "..."}
+    ]
+  },
+  "summary": {
+    "total_builds_scanned": 5,
+    "builds_with_failures": 3,
+    "total_unique_failures": 12,
+    "persistent_failures": 4,
+    "intermittent_failures": 8
+  },
+  "failures": [
+    {
+      "failure_key": "abc123",
+      "test_failure": {...},
+      "category": "NEW_REGRESSION",
+      "confidence": 0.5,
+      "occurrence_count": 3,
+      "seen_in_builds": ["48200", "48198", "48195"],
+      "seen_in_commits": ["abc123", "def456", "ghi789"],
+      "recurrence_rate": 0.6
+    }
+  ],
+  "scan_timestamp": "2026-02-03T12:00:00Z"
+}
+```
+
+**Examples:**
+
+```python
+# Basic usage - analyze last 24 hours
+result = await ciwatch.analyze_main_branch()
+
+# Custom time window and build count
+result = await ciwatch.analyze_main_branch(
+    hours_lookback=48,
+    max_builds=10
+)
+
+# Include scheduled builds
+result = await ciwatch.analyze_main_branch(
+    exclude_scheduled=False
+)
+```
+
+**Integrated Workflow with Test Analytics:**
+
+```python
+# 1. Analyze main branch
+result = await ciwatch.analyze_main_branch(hours_lookback=24, max_builds=5)
+
+# 2. Extract pytest nodeids from failures
+pytest_failures = [
+    f for f in result["failures"]
+    if "::" in f["test_failure"]["test_name"]
+]
+test_nodeids = [f["test_failure"]["test_name"] for f in pytest_failures]
+
+# 3. Batch check analytics (using existing tool!)
+analytics = await ciwatch.get_test_analytics_bulk(test_nodeids)
+
+# 4. Classify and report
+flaky = [r for r in analytics["results"] if r["is_flaky"]]
+new_regressions = analytics["not_found"]
+persistent = [f for f in pytest_failures if f["recurrence_rate"] > 0.5]
+
+# Report: "3 flaky (ignore), 2 new regressions (investigate), 1 persistent (critical)"
+```
+
+**Key Features:**
+- **Recurrence tracking**: Shows how many builds each failure appears in
+- **Persistent vs intermittent**: Failures with ≥50% recurrence rate are marked persistent
+- **Build context**: Tracks which builds and commits each failure appeared in
+- **Integration-ready**: Designed to work with `get_test_analytics_bulk` for comprehensive analysis
+
+**Performance:**
+- Scanning 5 builds: ~5-30 seconds (depending on failure count)
+- Each failed job log fetch: ~1-5 seconds
+- API calls: Same as running `scan_build` 5 times, but with aggregated results
 
 ## Output Examples
 
