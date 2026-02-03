@@ -244,17 +244,20 @@ async def scan_latest_nightly(
         - test_failure.job_name: Which job it came from
 
     IMPORTANT - Next step to classify flaky vs real issues:
-        Don't call get_job_test_failures! The scan already extracted test failures.
-        Instead, extract the test nodeids and check analytics:
 
-        # Extract test nodeids from the failures list
-        test_nodeids = [f["test_failure"]["test_name"] for f in result["failures"]]
+        # Check if failures have pytest nodeids (contain "::")
+        pytest_failures = [f for f in result["failures"]
+                          if "::" in f.get("test_failure", {}).get("test_name", "")]
 
-        # Batch check if they're flaky
-        analytics = await get_test_analytics_bulk(test_nodeids)
-
-        # Report: tests with is_flaky=True can be ignored,
-        #         tests in not_found likely need investigation
+        if pytest_failures:
+            # Scan already has pytest test nodeids - use them directly!
+            test_nodeids = [f["test_failure"]["test_name"] for f in pytest_failures]
+            analytics = await get_test_analytics_bulk(test_nodeids)
+            # Report flaky vs new regressions
+        else:
+            # Scan only has job-level failures - these are typically infrastructure failures
+            # (docker builds, environment setup, etc.) that don't need analytics checking
+            # Report them as infrastructure issues, not test regressions
     """
     try:
         # Initialize Buildkite client
@@ -410,17 +413,20 @@ async def scan_build(
         - test_failure.job_name: Which job it came from
 
     IMPORTANT - Next step to classify flaky vs real issues:
-        Don't call get_job_test_failures! The scan already extracted test failures.
-        Instead, extract the test nodeids and check analytics:
 
-        # Extract test nodeids from the failures list
-        test_nodeids = [f["test_failure"]["test_name"] for f in result["failures"]]
+        # Check if failures have pytest nodeids (contain "::")
+        pytest_failures = [f for f in result["failures"]
+                          if "::" in f.get("test_failure", {}).get("test_name", "")]
 
-        # Batch check if they're flaky
-        analytics = await get_test_analytics_bulk(test_nodeids)
-
-        # Report: tests with is_flaky=True can be ignored,
-        #         tests in not_found likely need investigation
+        if pytest_failures:
+            # Scan already has pytest test nodeids - use them directly!
+            test_nodeids = [f["test_failure"]["test_name"] for f in pytest_failures]
+            analytics = await get_test_analytics_bulk(test_nodeids)
+            # Report flaky vs new regressions
+        else:
+            # Scan only has job-level failures - these are typically infrastructure failures
+            # (docker builds, environment setup, etc.) that don't need analytics checking
+            # Report them as infrastructure issues, not test regressions
     """
     try:
         # Initialize Buildkite client
